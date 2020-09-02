@@ -1,5 +1,9 @@
+from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
+
 import numpy as np
+
 
 class KpsType(Enum):
     """official name for different type of joints"""
@@ -38,56 +42,27 @@ class KpsType(Enum):
     L_Heel = 32,
     R_Heel = 33,
     Chest = 34,
-    # for hand key-point annotation, check it here.
-    # https://github.com/CMU-Perceptual-Computing-Lab/openpose/blob/master/doc/output.md#hand-output-format
-    L_HandRoot = 35,
-    L_Thumb1CMC = 36,
-    L_Thumb2Knuckles = 37,
-    L_Thumb3IP = 38,
-    L_Thumb4FingerTip = 39,
-    L_Index1Knuckles = 40,
-    L_Index2PIP = 41,
-    L_Index3DIP = 42,
-    L_Index4FingerTip = 43,
-    L_Middle1Knuckles = 44,
-    L_Middle2PIP = 45,
-    L_Middle3DIP = 46,
-    L_Middle4FingerTip = 47,
-    L_Ring1Knuckles = 48,
-    L_Ring2PIP = 49,
-    L_Ring3DIP = 50,
-    L_Ring4FingerTip = 51,
-    L_Pinky1Knuckles = 52,
-    L_Pinky2PIP = 53,
-    L_Pinky3DIP = 54,
-    L_Pinky4FingerTip = 55,
-
-    R_HandRoot = 56,
-    R_Thumb1CMC = 57,
-    R_Thumb2Knuckles = 58,
-    R_Thumb3IP = 59,
-    R_Thumb4FingerTip = 60,
-    R_Index1Knuckles = 61,
-    R_Index2PIP = 62,
-    R_Index3DIP = 63,
-    R_Index4FingerTip = 64,
-    R_Middle1Knuckles = 65,
-    R_Middle2PIP = 66,
-    R_Middle3DIP = 67,
-    R_Middle4FingerTip = 68,
-    R_Ring1Knuckles = 69,
-    R_Ring2PIP = 70,
-    R_Ring3DIP = 71,
-    R_Ring4FingerTip = 72,
-    R_Pinky1Knuckles = 73,
-    R_Pinky2PIP = 74,
-    R_Pinky3DIP = 75,
-    R_Pinky4FingerTip = 76
+    LowerNeck = 35,
+    UpperNeck = 36,
+    LowerBack = 37,
+    UpperBack = 38,
+    L_Clavicle = 39,
+    R_Clavicle = 40,
+    Root = 41
 
 
 class KpsFormat(Enum):
     COCO = 0
     OPENPOSE_25 = 1
+    SMPLX_22 = 2
+
+
+@dataclass
+class Pose:
+    pose_type: KpsFormat
+    keypoints: np.ndarray
+    keypoints_score: Optional[np.ndarray]
+    box: Optional[np.ndarray]
 
 
 _COCO = [KpsType.Nose,
@@ -158,6 +133,49 @@ _OPENPOSE_25 = [
 ]
 _OPENPOSE_25_INDEX = {jtype: jidx for jidx, jtype in enumerate(_OPENPOSE_25)}
 
+_SMPLX_22 = [
+    KpsType.Mid_Hip,
+    KpsType.L_Hip,
+    KpsType.R_Hip,
+    KpsType.LowerBack,  # "lowerback",
+    KpsType.L_Knee,  # "lknee",
+    KpsType.R_Knee,  # "rknee",
+    KpsType.UpperBack,  # "upperback",
+    KpsType.L_Ankle,  # "lankle",
+    KpsType.R_Ankle,  # "rankle",
+    KpsType.Chest,  # "chest",
+    KpsType.L_BigToe,  # "ltoe",
+    KpsType.R_BigToe,  # "rtoe",
+    KpsType.LowerNeck,  # "lowerneck",
+    KpsType.L_Clavicle,  # "lclavicle",
+    KpsType.R_Clavicle,  # "rclavicle",
+    KpsType.UpperNeck,  # "upperneck",
+    KpsType.L_Shoulder,  # "lshoulder",
+    KpsType.R_Shoulder,  # "rshoulder",
+    KpsType.L_Elbow,  # "lelbow",
+    KpsType.R_Elbow,  # "relbow",
+    KpsType.L_Wrist,  # "lwrist",
+    KpsType.R_Wrist,  # "rwrist",
+]
+
+_SMPLX_22_Index = {jtype: jidx for jidx, jtype in enumerate(_SMPLX_22)}
+
+_SMPLX_22_Bone = [(KpsType.Mid_Hip, KpsType.L_Hip), (KpsType.Mid_Hip, KpsType.R_Hip),
+                  (KpsType.Mid_Hip, KpsType.LowerBack), (KpsType.LowerBack, KpsType.UpperBack),
+                  (KpsType.L_Hip, KpsType.L_Knee), (KpsType.R_Hip, KpsType.R_Knee),
+                  (KpsType.L_Knee, KpsType.L_Ankle), (KpsType.R_Knee, KpsType.R_Ankle),
+                  (KpsType.UpperBack, KpsType.Chest),
+                  (KpsType.L_Ankle, KpsType.L_BigToe), (KpsType.R_Ankle, KpsType.R_BigToe),
+                  (KpsType.Chest, KpsType.LowerNeck), (KpsType.LowerNeck, KpsType.UpperNeck),
+                  (KpsType.Chest, KpsType.R_Clavicle), (KpsType.R_Clavicle, KpsType.R_Shoulder),
+                  (KpsType.R_Shoulder, KpsType.R_Elbow),
+                  (KpsType.R_Elbow, KpsType.R_Wrist),
+                  (KpsType.Chest, KpsType.L_Clavicle), (KpsType.L_Clavicle, KpsType.L_Shoulder),
+                  (KpsType.L_Shoulder, KpsType.L_Elbow),
+                  (KpsType.L_Elbow, KpsType.L_Wrist)]
+
+_SMPLX_22_Bone_Index = [(_SMPLX_22_Index[j0], _SMPLX_22_Index[j1]) for (j0, j1) in _SMPLX_22_Bone]
+
 
 def conversion_openpose_25_to_coco(poses_openpose):
     n_joint = len(_COCO)
@@ -173,6 +191,8 @@ def conversion_openpose_25_to_coco(poses_openpose):
 def get_pose_bones_index(p_type):
     if p_type == KpsFormat.COCO:
         return _COCO_Bone_Index
+    elif p_type == KpsFormat.SMPLX_22:
+        return _SMPLX_22_Bone_Index
     else:
         raise ValueError('get_pose_bones_index')
 
@@ -182,5 +202,7 @@ def get_kps_index(p_type):
         return _COCO_Index
     elif p_type == KpsFormat.OPENPOSE_25:
         return _OPENPOSE_25_INDEX
+    elif p_type == KpsFormat.SMPLX_22:
+        return _SMPLX_22_Index
     else:
         raise ValueError('get_kps_index')
