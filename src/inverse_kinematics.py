@@ -10,6 +10,7 @@ import mpl_toolkits.mplot3d.axes3d as p3
 from Quaternions import Quaternions
 from util import descendants_mask
 from typing import List
+from dataclasses import dataclass
 from pose_def import KpsType, get_parent_index, KpsFormat, get_common_kps_idxs, get_kps_index
 
 matplotlib.use('Qt5Agg')
@@ -30,19 +31,40 @@ class Skeleton:
         self.head = skel['head']
 
 
-class ForwardKinematics:
-    def __init__(self, offsets, parents):
-        self.offset = offsets
-        self.parents = parents
-        self.n_joints = len(self.offset)
+def offsets_to_bone_dirs_bone_lens(offsets):
+    bone_lens = np.linalg.norm(offsets, axis=-1)
+    bdirs = offsets.copy()
+    bdirs[1:, :] = bdirs[1:, :] / bone_lens[1:][:, np.newaxis]
+    return bdirs, bone_lens
 
-    def forward(self, rotations: Quaternions, root_loc: Optional[np.ndarray]):
+
+def bone_dir_bone_lens_to_offsets(bone_dirs, bone_lens):
+    return bone_dirs * bone_lens[:, np.newaxis]
+
+
+class ForwardKinematics:
+    def __init__(self, ref_offsets, parents):
+        bdirs, blens = offsets_to_bone_dirs_bone_lens(ref_offsets)
+        self.ref_bone_lens = blens  # bone lens in the initial, reference pose
+        self.ref_bone_dirs = bdirs  # initial bone directions
+
+        self.parents = parents
+        self.n_joints = len(self.parents)
+
+    def forward(self, rotations: Quaternions, root_loc: Optional[np.ndarray], bone_lens: Optional[np.ndarray] = None):
         rot_mats = rotations.transforms()
         l_transforms = np.array([np.eye(4) for _ in range(self.n_joints)])
+
+        if bone_lens is None:
+            offsets = bone_dir_bone_lens_to_offsets(self.ref_bone_dirs, self.ref_bone_lens)
+        else:
+            assert bone_lens.shape == self.ref_bone_lens.shape
+            offsets = bone_dir_bone_lens_to_offsets(self.ref_bone_dirs, bone_lens)
+
         for j_i in range(self.n_joints):
             l_transforms[j_i, :3, :3] = rot_mats[j_i]
             if j_i != 0:
-                l_transforms[j_i, :3, 3] = self.offset[j_i]
+                l_transforms[j_i, :3, 3] = offsets[j_i]
             else:
                 if root_loc is not None:
                     l_transforms[j_i, :3, 3] = root_loc
@@ -150,6 +172,30 @@ def swap_y_z(poses):
     return poses
 
 
+@dataclass
+class PoseParam:
+    root: np.ndarray
+    euler_angles: np.ndarray
+    bone_lens: np.ndarray
+
+
+class TrackSkeleton:
+    def __init__(self, ref_joints_offsets, joints_parents):
+        super().__init__()
+        self.ref_joints_offsets = ref_joints_offsets
+        self.joints_parents = joints_parents
+        self.n_joints = len(self.joints_parents)
+        self.cur_pose = PoseParam(root=np.zeros((3,)),
+                                  euler_angles=np.zeros((self.n_joints, 3)),
+                                  bone_lens=np.zeros((self.n_joints,)))
+
+    def optimize_pose(self, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):
+        pass
+
+    def optimize_shape(self, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):
+        pass
+
+
 def run_test_ik(target_pose_3d: np.ndarray, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):
     in_kps_format = KpsFormat.COCO
     my_kps_format = KpsFormat.BASIC_18
@@ -169,10 +215,20 @@ def run_test_ik(target_pose_3d: np.ndarray, cam_poses_2d: List[np.ndarray], cam_
     model = ForwardKinematics(skl_offsets, skl_parents)
     n_cams = len(cam_projs)
 
-    def _residual_step_1(_x):
+    def _residual_step_joints_3d(_x):
         _root_pos = _x[:3]
+        _euler_angles = _x[3: n_joints * 3]
         _joint_quars = Quaternions.from_euler(_x[3:].reshape((-1, 3)))
-        _joint_locs, _ = model.forward(_joint_quars, _root_pos)
+        _joint_locs, _ = model.forward(_joint_quars, _root_pos, None)
+        _joint_locs = _joint_locs[my_kps_idxs, :]
+        _diffs = (_joint_locs - target_pose_3d_match).flatten()
+        return _diffs
+
+    def _residual_root_angles_bone_lens(_x):
+        _root_pos = _x[:3]
+        _joint_quars = Quaternions.from_euler(_x[3: 3 + n_joints * 3].reshape((-1, 3)))
+        _b_lens = _x[3 + n_joints * 3:]
+        _joint_locs, _ = model.forward(_joint_quars, _root_pos, _b_lens)
         _joint_locs = _joint_locs[my_kps_idxs, :]
         _diffs = (_joint_locs - target_pose_3d_match).flatten()
         return _diffs
@@ -203,16 +259,26 @@ def run_test_ik(target_pose_3d: np.ndarray, cam_poses_2d: List[np.ndarray], cam_
     init_quars = Quaternions.from_euler(params[3:].reshape((-1, 3)))
     init_locs, _ = model.forward(init_quars, init_root)
 
-    results = least_squares(_residual_step_1, params, verbose=2, max_nfev=100)
+    results = least_squares(_residual_step_joints_3d, params, verbose=2, max_nfev=100)
     params_1 = results.x
     pred_root_1 = params_1[:3]
     pred_quars_1 = Quaternions.from_euler(params_1[3:].reshape((-1, 3)))
     pred_locs_1, _ = model.forward(pred_quars_1, pred_root_1)
 
-    results = least_squares(_residual_step_2, params_1, verbose=2, max_nfev=100)
+    params_2 = np.zeros((3 + 3 * n_joints + n_joints))
+    params_2[:3 + 3 * n_joints] = params_1
+    params_2[3 + 3 * n_joints:] = model.ref_bone_lens.copy()
+    results = least_squares(_residual_root_angles_bone_lens, params_2, verbose=2, max_nfev=100)
     params_2 = results.x
     pred_root_2 = params_2[:3]
-    pred_quars_2 = Quaternions.from_euler(params_2[3:].reshape((-1, 3)))
-    pred_locs_2, _ = model.forward(pred_quars_2, pred_root_2)
+    pred_quars_2 = Quaternions.from_euler(params_2[3:3 + 3 * n_joints].reshape((-1, 3)))
+    pred_blens_2 = params_2[3 + 3 * n_joints: 3 + 3 * n_joints + n_joints]
+    pred_locs_2, _ = model.forward(pred_quars_2, pred_root_2, pred_blens_2)
+
+    # results = least_squares(_residual_step_2, params_1, verbose=2, max_nfev=100)
+    # params_2 = results.x
+    # pred_root_2 = params_2[:3]
+    # pred_quars_2 = Quaternions.from_euler(params_2[3:].reshape((-1, 3)))
+    # pred_locs_2, _ = model.forward(pred_quars_2, pred_root_2)
 
     plot_ik_result(pred_locs_1, pred_locs_2, target_pose=target_pose_3d, bone_idxs=bone_idxs, target_bone_idxs=None)
