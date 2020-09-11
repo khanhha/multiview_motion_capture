@@ -7,10 +7,10 @@ import matplotlib
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import mpl_toolkits.mplot3d.axes3d as p3
-from kinematics.Quaternions import Quaternions
-from kinematics.util import descendants_mask
+from Quaternions import Quaternions
+from util import descendants_mask
 from typing import List
-from pose_def import KpsType, get_parent_index, KpsFormat, get_common_kps_idxs, get_pose_bones_index, get_kps_index
+from pose_def import KpsType, get_parent_index, KpsFormat, get_common_kps_idxs, get_kps_index
 
 matplotlib.use('Qt5Agg')
 
@@ -116,7 +116,6 @@ def plot_ik_result(init_pose, pred_pose, target_pose, bone_idxs, target_bone_idx
 
 
 def load_skeleton():
-    from kinematics import bvh
     # bvh_path = '/media/F/thesis/libs/deep-motion-editing/style_transfer/data/xia_test/depressed_13_000.bvh'
     bvh_path = '/media/F/thesis/multiview_motion_capture/src/simple.bvh'
     offsets = [
@@ -151,43 +150,7 @@ def swap_y_z(poses):
     return poses
 
 
-def triangulate_optimize(target_pose_3d: np.ndarray, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):
-    in_kps_format = KpsFormat.COCO
-
-    bone_idxs = get_pose_bones_index(in_kps_format)
-    n_cams = len(cam_projs)
-
-    def _residual(_x):
-        # return _diffs.flatten()
-        _joint_locs = _x.reshape((-1, 3))
-        _joint_homos = np.concatenate([_joint_locs, np.ones((_joint_locs.shape[0], 1))], axis=-1).T
-        _diff_reprojs = []
-        for _vi in range(n_cams):
-            _proj = cam_projs[_vi] @ _joint_homos
-            _proj = (_proj[:2] / _proj[2]).T
-            # _d = (_proj - cam_poses_2d[_vi][:, :2]) * cam_poses_2d[_vi][:, -1:]
-            _d = np.linalg.norm(_proj - cam_poses_2d[_vi][:, :2], axis=-1)
-            _d = _d * cam_poses_2d[_vi][:, -1]
-            _diff_reprojs.append(_d)
-        _diff_reprojs = np.array(_diff_reprojs).flatten()
-
-        return _diff_reprojs
-
-    params = np.zeros((len(target_pose_3d), 3)).flatten()
-
-    results = least_squares(_residual, params, verbose=2, ftol=None, max_nfev=100)
-    params_1 = results.x
-
-    pred_locs = params_1.reshape((-1, 3))
-
-    # plot_ik_result(pred_locs, pred_locs, target_pose=target_pose_3d, bone_idxs=bone_idxs, target_bone_idxs=None)
-
-    return pred_locs
-
-
 def run_test_ik(target_pose_3d: np.ndarray, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):
-    target_pose_3d = triangulate_optimize(target_pose_3d, cam_poses_2d, cam_projs)
-
     in_kps_format = KpsFormat.COCO
     my_kps_format = KpsFormat.BASIC_18
     in_kps_idx_map = get_kps_index(in_kps_format)

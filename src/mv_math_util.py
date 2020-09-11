@@ -179,15 +179,16 @@ def homogeneous_to_euclidean(points):
 def triangulate_point_groups_from_multiple_views_linear(proj_matricies: np.ndarray,
                                                         points_grps: List[np.ndarray],
                                                         min_score,
-                                                        post_optimize=False):
+                                                        post_optimize=False,
+                                                        n_max_iter=2):
     """
+    :param n_max_iter:
     :param min_score: just apply triangulation on keypoints whose scores greater than this value. if no valid keypoints
     exist, resort to all keypoints
     :param proj_matricies: (N,3,4): sequence of projection matrices
     :param points_grps: List[Nx3]
     :param post_optimize:
     """
-    test_cnt = 0
     n_kps = len(points_grps[0])
     kps_3ds = []
     for kps_idx in range(n_kps):
@@ -209,23 +210,31 @@ def triangulate_point_groups_from_multiple_views_linear(proj_matricies: np.ndarr
             score = np.mean(points_2d[:, 2])
 
         point_3d = triangulate_point_from_multiple_views_linear(cams_p, points_2d[:, :2])
-        if post_optimize:
-            def _residual_func(x_):
-                x_ = x_.reshape((1, 3))
-                erros = []
-                for cam_idx, cam_p in enumerate(cams_p):
-                    reproj = project_3d_points_to_image_plane_without_distortion(cam_p, x_)[0, :]
-                    e = points_2d[cam_idx, 2] * 0.5 * np.sqrt(np.sum((points_2d[cam_idx, :2] - reproj) ** 2))
-                    erros.append(e)
-                return np.array(erros)
-
-            x_0 = np.array(point_3d)
-            res = least_squares(_residual_func, x_0, loss='huber', method='trf')
-            point_3d = res.x
-
         kps_3ds.append((point_3d[0], point_3d[1], point_3d[2], score))
 
-    return np.array(kps_3ds)
+    kps_3ds = np.array(kps_3ds)
+
+    if post_optimize:
+        n_cams = len(proj_matricies)
+
+        def _residual_func(_x):
+            _joint_locs = _x.reshape((-1, 3))
+            _joint_homos = np.concatenate([_joint_locs, np.ones((_joint_locs.shape[0], 1))], axis=-1).T
+            _diff_reprojs = []
+            for _vi in range(n_cams):
+                _proj = proj_matricies[_vi] @ _joint_homos
+                _proj = (_proj[:2] / _proj[2]).T
+                _d = np.linalg.norm(_proj - points_grps[_vi][:, :2], axis=-1)
+                _d = _d * points_grps[_vi][:, -1]
+                _diff_reprojs.append(_d)
+            _diff_reprojs = np.array(_diff_reprojs).flatten()
+            return _diff_reprojs
+
+        params = kps_3ds[:, :3].flatten().copy()
+        res = least_squares(_residual_func, params, max_nfev=n_max_iter)
+        kps_3ds[:, :3] = res.x.reshape((-1, 3))
+
+    return kps_3ds
 
 
 def triangulate_point_from_multiple_views_linear(proj_matricies: np.ndarray, points: np.ndarray):

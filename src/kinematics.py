@@ -4,7 +4,6 @@ import math
 import copy
 import os
 import sys
-from .skeleton import Skeleton
 from scipy.spatial.transform import Rotation
 from typing import List
 

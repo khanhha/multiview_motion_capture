@@ -1,4 +1,4 @@
-from kinematics.Quaternions import Quaternions
+from Quaternions import Quaternions
 import numpy as np
 import re
 

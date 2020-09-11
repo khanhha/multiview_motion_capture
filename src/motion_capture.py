@@ -268,15 +268,28 @@ class TrackState(Enum):
     Dead = 3
 
 
+def triangulate_util(cam_poses: List[Pose], cam_projs: List[np.ndarray], min_triangulate_score=0.01):
+    p_type = cam_poses[0].pose_type
+    poses = [np.concatenate([pose.keypoints, pose.keypoints_score], axis=-1) for pose in cam_poses]
+
+    p_3d = triangulate_point_groups_from_multiple_views_linear(np.array(cam_projs), poses,
+                                                               min_score=min_triangulate_score,
+                                                               post_optimize=True)
+    pose_3d = Pose(p_type, p_3d[:, :-1], p_3d[:, -1][:, np.newaxis], box=None)
+    return pose_3d
+
+
 class MvTracklet:
-    def __init__(self, frm_idx: int, p_3d: Pose,
+    def __init__(self, frm_idx: int,
                  cam_poses_2d: List[Pose],
                  cam_projs: List[np.ndarray],
-                 n_inits: int = 3, max_age: int = 3):
+                 n_inits: int = 3,
+                 max_age: int = 3):
         self.frame_idxs: List[int] = [frm_idx]
-        self.poses_3d: List[Pose] = [p_3d]
+        self.poses_3d: List[Pose] = [triangulate_util(cam_poses_2d, cam_projs)]
         self.cam_poses_2d: List[List[Pose]] = [cam_poses_2d]
         self.cam_projs: List[List[np.ndarray]] = [cam_projs]
+
         self.time_since_update = 0
         self.hits = 1
         self.state = TrackState.Tentative
@@ -294,18 +307,13 @@ class MvTracklet:
         self.time_since_update += 1
 
     def update(self, frm_idx: int, match: TrackletMatch, frames: List[FrameData]):
-        cam_projs = np.array([frames[v_idx].calib.P for v_idx in match.view_idxs])
+        cam_projs = [frames[v_idx].calib.P for v_idx in match.view_idxs]
         cam_poses = [frames[v_idx].poses[p_id] for v_idx, p_id in zip(match.view_idxs, match.pose_ids)]
-
-        p_type = cam_poses[0].pose_type
-        poses = [np.concatenate([pose.keypoints, pose.keypoints_score], axis=-1) for pose in cam_poses]
-
-        p_3d = triangulate_point_groups_from_multiple_views_linear(cam_projs, poses, min_score=0.1)
-        pose_3d = Pose(p_type, p_3d[:, :-1], p_3d[:, -1][:, np.newaxis], box=None)
+        pose_3d = triangulate_util(cam_poses, cam_projs)
 
         self.frame_idxs.append(frm_idx)
         self.cam_poses_2d.append(cam_poses)
-        self.cam_projs.append([cam_projs[i, ...] for i in range(len(cam_poses))])
+        self.cam_projs.append(cam_projs)
         self.poses_3d.append(pose_3d)
 
         self.time_since_update = 0
@@ -404,7 +412,7 @@ class MvTracker:
             if len(grp) >= 2:
                 p_3d_co = grp.triangulate()
                 p_3d = Pose(grp.poses[0].pose_type, p_3d_co[:, :3], p_3d_co[:, -1][:, np.newaxis], box=None)
-                tlet = MvTracklet(frm_idx, p_3d=p_3d, cam_poses_2d=grp.poses, cam_projs=grp.cam_projs)
+                tlet = MvTracklet(frm_idx, cam_poses_2d=grp.poses, cam_projs=grp.cam_projs)
                 self.tracklets.append(tlet)
 
         # filter out dead tracks
