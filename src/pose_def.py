@@ -55,6 +55,7 @@ class KpsFormat(Enum):
     COCO = 0
     OPENPOSE_25 = 1
     SMPLX_22 = 2
+    BASIC_18 = 3
 
 
 @dataclass
@@ -63,6 +64,9 @@ class Pose:
     keypoints: np.ndarray
     keypoints_score: Optional[np.ndarray]
     box: Optional[np.ndarray]
+
+    def to_kps_array(self):
+        return np.concatenate([self.keypoints, self.keypoints_score.reshape((-1, 1))], axis=1)
 
 
 _COCO = [KpsType.Nose,
@@ -176,6 +180,51 @@ _SMPLX_22_Bone = [(KpsType.Mid_Hip, KpsType.L_Hip), (KpsType.Mid_Hip, KpsType.R_
 
 _SMPLX_22_Bone_Index = [(_SMPLX_22_Index[j0], _SMPLX_22_Index[j1]) for (j0, j1) in _SMPLX_22_Bone]
 
+_BASIC_18_PARENTS = {
+    KpsType.Root: KpsType.Root,
+    KpsType.L_Hip: KpsType.Root,
+    KpsType.L_Knee: KpsType.L_Hip,
+    KpsType.L_Ankle: KpsType.L_Knee,
+    KpsType.R_Hip: KpsType.Root,
+    KpsType.R_Knee: KpsType.R_Hip,
+    KpsType.R_Ankle: KpsType.R_Knee,
+    KpsType.Spine: KpsType.Root,
+    KpsType.Neck: KpsType.Spine,
+    KpsType.L_Shoulder: KpsType.Neck,
+    KpsType.L_Elbow: KpsType.L_Shoulder,
+    KpsType.L_Wrist: KpsType.L_Elbow,
+    KpsType.R_Shoulder: KpsType.Neck,
+    KpsType.R_Elbow: KpsType.R_Shoulder,
+    KpsType.R_Wrist: KpsType.R_Elbow,
+    KpsType.Head_Bottom: KpsType.Neck,
+    KpsType.L_Ear: KpsType.Head_Bottom,
+    KpsType.R_Ear: KpsType.Head_Bottom
+}
+
+_BASIC_18 = [KpsType.Root,
+             KpsType.L_Hip,
+             KpsType.L_Knee,
+             KpsType.L_Ankle,
+             KpsType.R_Hip,
+             KpsType.R_Knee,
+             KpsType.R_Ankle,
+             KpsType.Spine,
+             KpsType.Neck,
+             KpsType.L_Shoulder,
+             KpsType.L_Elbow,
+             KpsType.L_Wrist,
+             KpsType.R_Shoulder,
+             KpsType.R_Elbow,
+             KpsType.R_Wrist,
+             KpsType.Head_Bottom,
+             KpsType.L_Ear,
+             KpsType.R_Ear]
+
+_BASIC_18_Index = {jtype: jidx for jidx, jtype in enumerate(_BASIC_18)}
+_BASIC_18_PARENTS_Index = [_BASIC_18_Index[_BASIC_18_PARENTS[jtype]] if _BASIC_18_PARENTS[jtype] != jtype else -1 for
+                           jtype in
+                           _BASIC_18]
+
 
 def conversion_openpose_25_to_coco(poses_openpose):
     n_joint = len(_COCO)
@@ -188,6 +237,19 @@ def conversion_openpose_25_to_coco(poses_openpose):
     return coco
 
 
+def get_common_kps_idxs(src_p_type, dst_p_type):
+    src_order = get_kps_order(src_p_type)
+    dst_idx_map = get_kps_index(dst_p_type)
+
+    src_idxs = []
+    dst_idxs = []
+    for src_idx, src_jtype in enumerate(src_order):
+        if src_jtype in dst_idx_map:
+            src_idxs.append(src_idx)
+            dst_idxs.append(dst_idx_map[src_jtype])
+    return src_idxs, dst_idxs
+
+
 def get_pose_bones_index(p_type):
     if p_type == KpsFormat.COCO:
         return _COCO_Bone_Index
@@ -197,6 +259,19 @@ def get_pose_bones_index(p_type):
         raise ValueError('get_pose_bones_index')
 
 
+def get_kps_order(p_type):
+    if p_type == KpsFormat.COCO:
+        return _COCO
+    elif p_type == KpsFormat.OPENPOSE_25:
+        return _OPENPOSE_25
+    elif p_type == KpsFormat.SMPLX_22:
+        return _SMPLX_22
+    elif p_type == KpsFormat.BASIC_18:
+        return _BASIC_18
+    else:
+        raise ValueError('get_kps_index')
+
+
 def get_kps_index(p_type):
     if p_type == KpsFormat.COCO:
         return _COCO_Index
@@ -204,5 +279,14 @@ def get_kps_index(p_type):
         return _OPENPOSE_25_INDEX
     elif p_type == KpsFormat.SMPLX_22:
         return _SMPLX_22_Index
+    elif p_type == KpsFormat.BASIC_18:
+        return _BASIC_18_Index
     else:
         raise ValueError('get_kps_index')
+
+
+def get_parent_index(p_type):
+    if p_type == KpsFormat.BASIC_18:
+        return _BASIC_18_PARENTS_Index
+    else:
+        raise ValueError(f'get_parent_index: {p_type}')

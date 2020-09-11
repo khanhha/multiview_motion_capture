@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from scipy.optimize import least_squares
 
 
 @dataclass
@@ -36,7 +37,7 @@ def points_to_lines_distances(points_0: np.ndarray, points_1: np.ndarray, rays_1
     dsts = []
     for i in range(n_points):
         p0, p1 = points_0[i, :3], points_1[i, :3]
-        dst = np.linalg.norm(np.cross(p0-p1, rays_1[i, :3]))
+        dst = np.linalg.norm(np.cross(p0 - p1, rays_1[i, :3]))
         dsts.append(dst)
     return dsts
 
@@ -177,35 +178,52 @@ def homogeneous_to_euclidean(points):
 
 def triangulate_point_groups_from_multiple_views_linear(proj_matricies: np.ndarray,
                                                         points_grps: List[np.ndarray],
-                                                        min_score):
+                                                        min_score,
+                                                        post_optimize=False):
     """
     :param min_score: just apply triangulation on keypoints whose scores greater than this value. if no valid keypoints
     exist, resort to all keypoints
     :param proj_matricies: (N,3,4): sequence of projection matrices
     :param points_grps: List[Nx3]
+    :param post_optimize:
     """
+    test_cnt = 0
     n_kps = len(points_grps[0])
     kps_3ds = []
     for kps_idx in range(n_kps):
-        points = []
+        points_2d = []
         cams_p = []
         for grp_idx, grp in enumerate(points_grps):
             if grp[kps_idx, 2] >= min_score:
-                points.append(grp[kps_idx, :])
+                points_2d.append(grp[kps_idx, :])
                 cams_p.append(proj_matricies[grp_idx, :])
 
-        if len(points) < 2:
+        if len(points_2d) < 2:
             # if not enough points are collected. resort to all points
-            points = np.array([grp[kps_idx, :] for grp in points_grps])
+            points_2d = np.array([grp[kps_idx, :] for grp in points_grps])
             score = np.mean(np.array([grp[kps_idx, 2] for grp in points_grps]))
             cams_p = proj_matricies
         else:
-            points = np.array(points)
+            points_2d = np.array(points_2d)
             cams_p = np.array(cams_p)
-            score = np.mean(points[:, 2])
+            score = np.mean(points_2d[:, 2])
 
-        p = triangulate_point_from_multiple_views_linear(cams_p, points[:, :2])
-        kps_3ds.append((p[0], p[1], p[2], score))
+        point_3d = triangulate_point_from_multiple_views_linear(cams_p, points_2d[:, :2])
+        if post_optimize:
+            def _residual_func(x_):
+                x_ = x_.reshape((1, 3))
+                erros = []
+                for cam_idx, cam_p in enumerate(cams_p):
+                    reproj = project_3d_points_to_image_plane_without_distortion(cam_p, x_)[0, :]
+                    e = points_2d[cam_idx, 2] * 0.5 * np.sqrt(np.sum((points_2d[cam_idx, :2] - reproj) ** 2))
+                    erros.append(e)
+                return np.array(erros)
+
+            x_0 = np.array(point_3d)
+            res = least_squares(_residual_func, x_0, loss='huber', method='trf')
+            point_3d = res.x
+
+        kps_3ds.append((point_3d[0], point_3d[1], point_3d[2], score))
 
     return np.array(kps_3ds)
 

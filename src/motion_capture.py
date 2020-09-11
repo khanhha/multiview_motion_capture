@@ -21,10 +21,11 @@ from tqdm import tqdm
 import imageio
 from scipy.optimize import linear_sum_assignment
 from typing import Tuple
-from pose_def import KpsType, KpsFormat, get_pose_bones_index, conversion_openpose_25_to_coco
+from pose_def import Pose, KpsType, KpsFormat, get_pose_bones_index, conversion_openpose_25_to_coco
 from mv_math_util import (Calib, calc_epipolar_error, triangulate_point_groups_from_multiple_views_linear,
                           project_3d_points_to_image_plane_without_distortion, unproject_uv_to_rays,
                           points_to_lines_distances)
+from pose_viz import plot_poses_3d
 from enum import Enum
 
 matplotlib.use('Qt5Agg')
@@ -71,6 +72,10 @@ class PoseAssociation:
     @property
     def poses(self):
         return [obj[1] for obj in self.id_poses]
+
+    @property
+    def cam_projs(self):
+        return [c.P for c in self.cams]
 
     def calc_epipolar_error(self, cam_o: Calib, pose_o: Pose):
         too_wrong = False  # if true we cannot join {other} with this
@@ -264,8 +269,14 @@ class TrackState(Enum):
 
 
 class MvTracklet:
-    def __init__(self, frm_idx: int, p_3d: Pose, n_inits: int = 3, max_age: int = 3):
-        self.poses_3d: List[Tuple[int, Pose]] = [(frm_idx, p_3d)]
+    def __init__(self, frm_idx: int, p_3d: Pose,
+                 cam_poses_2d: List[Pose],
+                 cam_projs: List[np.ndarray],
+                 n_inits: int = 3, max_age: int = 3):
+        self.frame_idxs: List[int] = [frm_idx]
+        self.poses_3d: List[Pose] = [p_3d]
+        self.cam_poses_2d: List[List[Pose]] = [cam_poses_2d]
+        self.cam_projs: List[List[np.ndarray]] = [cam_projs]
         self.time_since_update = 0
         self.hits = 1
         self.state = TrackState.Tentative
@@ -274,7 +285,10 @@ class MvTracklet:
 
     @property
     def last_pose_3d(self):
-        return self.poses_3d[-1][1]
+        return self.poses_3d[-1]
+
+    def __len__(self):
+        return len(self.frame_idxs)
 
     def predict(self):
         self.time_since_update += 1
@@ -282,11 +296,17 @@ class MvTracklet:
     def update(self, frm_idx: int, match: TrackletMatch, frames: List[FrameData]):
         cam_projs = np.array([frames[v_idx].calib.P for v_idx in match.view_idxs])
         cam_poses = [frames[v_idx].poses[p_id] for v_idx, p_id in zip(match.view_idxs, match.pose_ids)]
+
         p_type = cam_poses[0].pose_type
         poses = [np.concatenate([pose.keypoints, pose.keypoints_score], axis=-1) for pose in cam_poses]
+
         p_3d = triangulate_point_groups_from_multiple_views_linear(cam_projs, poses, min_score=0.1)
         pose_3d = Pose(p_type, p_3d[:, :-1], p_3d[:, -1][:, np.newaxis], box=None)
-        self.poses_3d.append((frm_idx, pose_3d))
+
+        self.frame_idxs.append(frm_idx)
+        self.cam_poses_2d.append(cam_poses)
+        self.cam_projs.append([cam_projs[i, ...] for i in range(len(cam_poses))])
+        self.poses_3d.append(pose_3d)
 
         self.time_since_update = 0
         self.hits += 1
@@ -384,7 +404,7 @@ class MvTracker:
             if len(grp) >= 2:
                 p_3d_co = grp.triangulate()
                 p_3d = Pose(grp.poses[0].pose_type, p_3d_co[:, :3], p_3d_co[:, -1][:, np.newaxis], box=None)
-                tlet = MvTracklet(frm_idx, p_3d)
+                tlet = MvTracklet(frm_idx, p_3d=p_3d, cam_poses_2d=grp.poses, cam_projs=grp.cam_projs)
                 self.tracklets.append(tlet)
 
         # filter out dead tracks
@@ -439,6 +459,16 @@ def load_pickle(fpath: Path, mode):
         return pickle.load(file)
 
 
+def test_ik_tlet(tlet: MvTracklet):
+    from inverse_kinematics import run_test_ik
+    n = len(tlet)
+    for i in range(n):
+        p_3d = tlet.poses_3d[i]
+        cam_poses = tlet.cam_poses_2d[i]
+        cam_projs = tlet.cam_projs[i]
+        run_test_ik(p_3d.keypoints, [p.to_kps_array() for p in cam_poses], cam_projs)
+
+
 def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     vpaths = sorted([vpath for vpath in video_dir.glob('*.*')], key=lambda path: path.stem)
     vreaders = [cv2.VideoCapture(str(vpath)) for vpath in vpaths]
@@ -448,6 +478,7 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
 
     tracker = MvTracker()
     frm_idx = 0
+    n_test = 10
     with tqdm(total=len(frm_pose_paths), desc='tracking') as bar:
         while True:
             bar.update()
@@ -470,7 +501,7 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
             tracker.update(frm_idx, d_frames)
             frm_idx += 1
 
-            if frm_idx >= 1000:
+            if frm_idx >= n_test:
                 break
 
     db_writer.close()
@@ -479,7 +510,9 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     all_tlets = sorted(all_tlets, key=lambda tlet: -len(tlet.poses_3d))
     all_tlets = all_tlets[:2]
 
-    poses_3d = [p[1] for p in all_tlets[0].poses_3d]
+    test_ik_tlet(all_tlets[0])
+
+    poses_3d = [p for p in all_tlets[0].poses_3d]
     plot_poses_3d(poses_3d, '/media/F/thesis/data/test_mv/2_pp/test_tracklet.mp4')
 
 
