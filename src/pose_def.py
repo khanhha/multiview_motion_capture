@@ -181,14 +181,14 @@ _SMPLX_22_Bone = [(KpsType.Mid_Hip, KpsType.L_Hip), (KpsType.Mid_Hip, KpsType.R_
 _SMPLX_22_Bone_Index = [(_SMPLX_22_Index[j0], _SMPLX_22_Index[j1]) for (j0, j1) in _SMPLX_22_Bone]
 
 _BASIC_18_PARENTS = {
-    KpsType.Root: KpsType.Root,
-    KpsType.L_Hip: KpsType.Root,
+    KpsType.Mid_Hip: KpsType.Mid_Hip,
+    KpsType.L_Hip: KpsType.Mid_Hip,
     KpsType.L_Knee: KpsType.L_Hip,
     KpsType.L_Ankle: KpsType.L_Knee,
-    KpsType.R_Hip: KpsType.Root,
+    KpsType.R_Hip: KpsType.Mid_Hip,
     KpsType.R_Knee: KpsType.R_Hip,
     KpsType.R_Ankle: KpsType.R_Knee,
-    KpsType.Spine: KpsType.Root,
+    KpsType.Spine: KpsType.Mid_Hip,
     KpsType.Neck: KpsType.Spine,
     KpsType.L_Shoulder: KpsType.Neck,
     KpsType.L_Elbow: KpsType.L_Shoulder,
@@ -201,7 +201,7 @@ _BASIC_18_PARENTS = {
     KpsType.R_Ear: KpsType.Head_Bottom
 }
 
-_BASIC_18 = [KpsType.Root,
+_BASIC_18 = [KpsType.Mid_Hip,
              KpsType.L_Hip,
              KpsType.L_Knee,
              KpsType.L_Ankle,
@@ -235,6 +235,11 @@ def conversion_openpose_25_to_coco(poses_openpose):
         opn = poses_openpose[_OPENPOSE_25_INDEX[j_type], :]
         coco[_COCO_Index[j_type], :] = opn
     return coco
+
+
+def map_to_common_keypoints(pose_0: Pose, pose_1: Pose):
+    kps_idxs_0, kps_idxs_1 = get_common_kps_idxs(pose_0.pose_type, pose_1.pose_type)
+    return pose_0.to_kps_array()[kps_idxs_0, :], pose_1.to_kps_array()[kps_idxs_1, :]
 
 
 def get_common_kps_idxs(src_p_type, dst_p_type):

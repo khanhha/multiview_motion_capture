@@ -9,27 +9,12 @@ import matplotlib.pyplot as plt
 import mpl_toolkits.mplot3d.axes3d as p3
 from Quaternions import Quaternions
 from util import descendants_mask
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from dataclasses import dataclass
-from pose_def import KpsType, get_parent_index, KpsFormat, get_common_kps_idxs, get_kps_index
+from pose_def import KpsType, get_parent_index, KpsFormat, get_common_kps_idxs, get_kps_index, Pose
 from mv_math_util import triangulate_point_groups_from_multiple_views_linear
 
 matplotlib.use('Qt5Agg')
-
-
-class Skeleton:
-    def __init__(self):
-        filename = '/media/F/thesis/libs/deep-motion-editing/style_transfer/global_info/skeleton_CMU.yml'
-        with open(filename, "r") as file:
-            skel = yaml.load(file, Loader=yaml.Loader)
-        self.bvh_name = os.path.join(os.path.dirname(filename), skel['BVH'])
-        self.offset = np.array(skel['offsets'])
-        self.n_joints = len(self.offset)
-        self.topology = np.array(skel['parents'])
-        self.chosen_joints = np.array(skel['chosen_joints'])
-        self.chosen_parents = np.array(skel['chosen_parents'])
-        self.hips, self.sdrs = skel['hips'], skel['shoulders']
-        self.head = skel['head']
 
 
 def offsets_to_bone_dirs_bone_lens(offsets):
@@ -41,42 +26,6 @@ def offsets_to_bone_dirs_bone_lens(offsets):
 
 def bone_dir_bone_lens_to_offsets(bone_dirs, bone_lens):
     return bone_dirs * bone_lens[:, np.newaxis]
-
-
-class ForwardKinematics:
-    def __init__(self, ref_offsets, parents):
-        bdirs, blens = offsets_to_bone_dirs_bone_lens(ref_offsets)
-        self.ref_bone_lens = blens  # bone lens in the initial, reference pose
-        self.ref_bone_dirs = bdirs  # initial bone directions
-
-        self.parents = parents
-        self.n_joints = len(self.parents)
-
-    def forward(self, rotations: Quaternions, root_loc: Optional[np.ndarray], bone_lens: Optional[np.ndarray] = None):
-        rot_mats = rotations.transforms()
-        l_transforms = np.array([np.eye(4) for _ in range(self.n_joints)])
-
-        if bone_lens is None:
-            offsets = bone_dir_bone_lens_to_offsets(self.ref_bone_dirs, self.ref_bone_lens)
-        else:
-            assert bone_lens.shape == self.ref_bone_lens.shape
-            offsets = bone_dir_bone_lens_to_offsets(self.ref_bone_dirs, bone_lens)
-
-        for j_i in range(self.n_joints):
-            l_transforms[j_i, :3, :3] = rot_mats[j_i]
-            if j_i != 0:
-                l_transforms[j_i, :3, 3] = offsets[j_i]
-            else:
-                if root_loc is not None:
-                    l_transforms[j_i, :3, 3] = root_loc
-
-        g_transforms = l_transforms.copy()
-        for j_i in range(1, self.n_joints):
-            g_transforms[j_i, :, :] = g_transforms[self.parents[j_i], :, :] @ l_transforms[j_i, :, :]
-
-        g_pos = g_transforms[:, :, 3]
-        g_pos = g_pos[:, :3] / g_pos[:, 3, np.newaxis]
-        return g_pos, g_transforms
 
 
 def plot_poses_3d(poses_3d: np.array, bones_idxs, target_pose, interval=50):
@@ -138,52 +87,12 @@ def plot_ik_result(init_pose, pred_pose, target_pose, bone_idxs, target_bone_idx
     plt.show()
 
 
-def load_skeleton():
-    # bvh_path = '/media/F/thesis/libs/deep-motion-editing/style_transfer/data/xia_test/depressed_13_000.bvh'
-    bvh_path = '/media/F/thesis/multiview_motion_capture/src/simple.bvh'
-    offsets = [
-        [0, 0, 0],
-        [0.15, 0, 0],
-        [0, 0, -0.5],
-        [0, 0, -0.5],
-        [-0.15, 0, 0],
-        [0, 0, -0.5],
-        [0, 0, -0.5],
-        [0, 0, 0.3],
-        [0, 0, 0.3],
-        [0.2, 0, 0],
-        [0.3, 0, 0],
-        [0.3, 0, 0],
-        [-0.2, 0, 0],
-        [-0.3, 0, 0],
-        [-0.3, 0, 0],
-        [0, 0, 0.3],
-        [0.07, 0, 0.1],
-        [-0.07, 0, 0.1]
-    ]
-
-    return np.array(offsets), get_parent_index(KpsFormat.BASIC_18)
-
-
 def swap_y_z(poses):
     y = poses[..., 1].copy()
     z = poses[..., 2].copy()
     poses[..., 2] = y
     poses[..., 1] = z
     return poses
-
-
-@dataclass
-class PoseParam:
-    root: np.ndarray
-    euler_angles: np.ndarray
-
-    def to_params(self):
-        return np.concatenate([self.root.flatten(), self.euler_angles.flatten()])
-
-    @classmethod
-    def from_params(cls, params, n_joints):
-        return PoseParam(params[:3], params[3:3 * n_joints].reshape((-1, 3)))
 
 
 @dataclass
@@ -212,6 +121,45 @@ class Skeleton:
         for i, i_p in enumerate(self.joint_parents[1:]):
             bone_idxs.append((i + 1, i_p))
         return bone_idxs
+
+
+def load_skeleton():
+    offsets = [
+        [0, 0, 0],
+        [0.15, 0, 0],
+        [0, 0, -0.5],
+        [0, 0, -0.5],
+        [-0.15, 0, 0],
+        [0, 0, -0.5],
+        [0, 0, -0.5],
+        [0, 0, 0.3],
+        [0, 0, 0.3],
+        [0.2, 0, 0],
+        [0.3, 0, 0],
+        [0.3, 0, 0],
+        [-0.2, 0, 0],
+        [-0.3, 0, 0],
+        [-0.3, 0, 0],
+        [0, 0, 0.3],
+        [0.07, 0, 0.1],
+        [-0.07, 0, 0.1]
+    ]
+
+    skl_offsets, skl_parents = np.array(offsets), get_parent_index(KpsFormat.BASIC_18)
+    n_joints = len(skl_parents)
+    bone_idxs = []
+    for i, i_p in enumerate(skl_parents[1:]):
+        bone_idxs.append((i + 1, i_p))
+
+    skel_bdirs, skel_blens = offsets_to_bone_dirs_bone_lens(skl_offsets)
+    skel = Skeleton(ref_joint_euler_angles=np.zeros((n_joints, 3)),
+                    ref_bone_dirs=skel_bdirs,
+                    ref_bone_lens=skel_blens,
+                    joint_parents=skl_parents,
+                    n_joints=len(skl_parents),
+                    kps_format=KpsFormat.BASIC_18)
+    # return np.array(offsets), get_parent_index(KpsFormat.BASIC_18)
+    return skel
 
 
 def foward_kinematics(skel: Skeleton, param: PoseShapeParam):
@@ -259,8 +207,9 @@ def solve_pose(skel: Skeleton,
         _root, _angles = _decompose(_x)
         _joint_locs, _ = foward_kinematics(skel, PoseShapeParam(_root, _angles, init_param.bone_lens))
         _joint_locs = _joint_locs[skel_kps_idxs, :]
-        _diffs = (_joint_locs - target_pose_3d_shared[:, :3]).flatten()
-        return _diffs
+        _diffs = (_joint_locs - target_pose_3d_shared[:, :3])
+        _diffs = _diffs * target_pose_3d_shared[:, -1:]
+        return _diffs.flatten()
 
     results = least_squares(_residual_step_joints_3d, _compose(init_param), verbose=2, max_nfev=100)
     root, angles = _decompose(results.x)
@@ -286,8 +235,9 @@ def solve_pose_bone_lens(skel: Skeleton,
         _joint_locs, _ = foward_kinematics(skel,
                                            PoseShapeParam(_root, _angles, _blens))
         _joint_locs = _joint_locs[skel_kps_idxs, :]
-        _diffs = (_joint_locs - target_pose_3d_shared[:, :3]).flatten()
-        return _diffs
+        _diffs = (_joint_locs - target_pose_3d_shared[:, :3])
+        _diffs = _diffs * target_pose_3d_shared[:, -1:]
+        return _diffs.flatten()
 
     results = least_squares(_residual_root_angles_bone_lens, _compose(init_param), verbose=2, max_nfev=100)
     root, angles, blens = _decompose(results.x)
@@ -311,7 +261,7 @@ class PoseSolver:
         self.obs_kps_idx_map = get_kps_index(self.obs_kps_format)
         self.skel_kps_idxs, self.obs_kps_idxs = get_common_kps_idxs(self.skel_kps_format, obs_kps_format)
 
-    def solve(self):
+    def solve(self) -> Tuple[PoseShapeParam, Pose]:
         obs_pose_3d = triangulate_point_groups_from_multiple_views_linear(self.cam_projs,
                                                                           self.cam_poses_2d, 0.01, True)
 
@@ -333,6 +283,11 @@ class PoseSolver:
                        target_pose=obs_pose_3d,
                        bone_idxs=self.skel.bone_idxs,
                        target_bone_idxs=None)
+
+        return param_2, Pose(keypoints=pred_locs_1,
+                             keypoints_score=np.zeros((len(pred_locs_1), 1)),
+                             box=None,
+                             pose_type=KpsFormat.BASIC_18)
 
 
 def run_test_ik(target_pose_3d: np.ndarray, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):

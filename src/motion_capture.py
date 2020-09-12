@@ -21,13 +21,14 @@ from tqdm import tqdm
 import imageio
 from scipy.optimize import linear_sum_assignment
 from typing import Tuple
-from pose_def import Pose, KpsType, KpsFormat, get_pose_bones_index, conversion_openpose_25_to_coco
+from pose_def import (Pose, KpsType, KpsFormat, get_pose_bones_index, conversion_openpose_25_to_coco,
+                      map_to_common_keypoints)
 from mv_math_util import (Calib, calc_epipolar_error, triangulate_point_groups_from_multiple_views_linear,
                           project_3d_points_to_image_plane_without_distortion, unproject_uv_to_rays,
                           points_to_lines_distances)
 from pose_viz import plot_poses_3d
 from enum import Enum
-from inverse_kinematics import PoseParam, Skeleton
+from inverse_kinematics import PoseShapeParam, Skeleton, PoseSolver, load_skeleton
 
 matplotlib.use('Qt5Agg')
 
@@ -285,15 +286,21 @@ class MvTracklet:
                  frm_idx: int,
                  cam_poses_2d: List[Pose],
                  cam_projs: List[np.ndarray],
+                 skel: Skeleton,
                  n_inits: int = 3,
                  max_age: int = 3):
         self.frame_idxs: List[int] = [frm_idx]
-        self.poses_3d: List[Pose] = [triangulate_util(cam_poses_2d, cam_projs)]
         self.cam_poses_2d: List[List[Pose]] = [cam_poses_2d]
         self.cam_projs: List[List[np.ndarray]] = [cam_projs]
+        self.skel = skel
+        solver = PoseSolver(skel, init_pose=None,
+                            cam_poses_2d=[p.to_kps_array() for p in cam_poses_2d],
+                            cam_projs=cam_projs,
+                            obs_kps_format=cam_poses_2d[0].pose_type)
+        pparam, pose = solver.solve()
+        self.poses: List[Tuple[PoseShapeParam, Pose]] = [(pparam, pose)]
 
         self.bone_lengs: np.ndarray
-        self.poses: List[PoseParam]
 
         self.time_since_update = 0
         self.hits = 1
@@ -303,7 +310,7 @@ class MvTracklet:
 
     @property
     def last_pose_3d(self):
-        return self.poses_3d[-1]
+        return self.poses[-1][1]
 
     def __len__(self):
         return len(self.frame_idxs)
@@ -314,12 +321,18 @@ class MvTracklet:
     def update(self, frm_idx: int, match: TrackletMatch, frames: List[FrameData]):
         cam_projs = [frames[v_idx].calib.P for v_idx in match.view_idxs]
         cam_poses = [frames[v_idx].poses[p_id] for v_idx, p_id in zip(match.view_idxs, match.pose_ids)]
-        pose_3d = triangulate_util(cam_poses, cam_projs)
 
         self.frame_idxs.append(frm_idx)
         self.cam_poses_2d.append(cam_poses)
         self.cam_projs.append(cam_projs)
-        self.poses_3d.append(pose_3d)
+
+        solver = PoseSolver(self.skel,
+                            init_pose=self.poses[-1][0],
+                            cam_poses_2d=[p.to_kps_array() for p in cam_poses],
+                            cam_projs=cam_projs,
+                            obs_kps_format=cam_poses[0].pose_type)
+        pparam, pose = solver.solve()
+        self.poses.append((pparam, pose))
 
         self.time_since_update = 0
         self.hits += 1
@@ -344,15 +357,17 @@ class MvTracklet:
 
 
 class MvTracker:
-    def __init__(self):
+    def __init__(self, skel: Skeleton):
         self.tracklets: List[MvTracklet] = []
         self.dead_tracklets: List[MvTracklet] = []
+        self.skeleton = skel
 
     @classmethod
     def tracklet_to_pose_2d_cost(cls, tlet: MvTracklet, pose_2d: Pose, calib: Calib):
-        kps_rays = unproject_uv_to_rays(pose_2d.keypoints, calib)
+        kps_2ds, kps_3ds = map_to_common_keypoints(pose_2d, tlet.last_pose_3d)
+        kps_rays = unproject_uv_to_rays(kps_2ds[:, :2], calib)
         cam_locs = np.repeat(calib.cam_loc.reshape((1, 3)), len(kps_rays), 0)
-        kps_dsts = points_to_lines_distances(tlet.last_pose_3d.keypoints, cam_locs, kps_rays)
+        kps_dsts = points_to_lines_distances(kps_3ds[:, :3], cam_locs, kps_rays)
         return np.mean(kps_dsts)
 
     @classmethod
@@ -417,7 +432,7 @@ class MvTracker:
             if len(grp) >= 2:
                 p_3d_co = grp.triangulate()
                 p_3d = Pose(grp.poses[0].pose_type, p_3d_co[:, :3], p_3d_co[:, -1][:, np.newaxis], box=None)
-                tlet = MvTracklet(frm_idx, cam_poses_2d=grp.poses, cam_projs=grp.cam_projs)
+                tlet = MvTracklet(frm_idx, cam_poses_2d=grp.poses, cam_projs=grp.cam_projs, skel=self.skeleton)
                 self.tracklets.append(tlet)
 
         # filter out dead tracks
@@ -489,7 +504,8 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     vpath = '/media/F/thesis/data/debug/test.mp4'
     db_writer = imageio.get_writer(vpath)
 
-    tracker = MvTracker()
+    skeleton = load_skeleton()
+    tracker = MvTracker(skeleton)
     frm_idx = 0
     n_test = 10
     with tqdm(total=len(frm_pose_paths), desc='tracking') as bar:
