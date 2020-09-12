@@ -9,9 +9,10 @@ import matplotlib.pyplot as plt
 import mpl_toolkits.mplot3d.axes3d as p3
 from Quaternions import Quaternions
 from util import descendants_mask
-from typing import List
+from typing import List, Dict
 from dataclasses import dataclass
 from pose_def import KpsType, get_parent_index, KpsFormat, get_common_kps_idxs, get_kps_index
+from mv_math_util import triangulate_point_groups_from_multiple_views_linear
 
 matplotlib.use('Qt5Agg')
 
@@ -176,34 +177,172 @@ def swap_y_z(poses):
 class PoseParam:
     root: np.ndarray
     euler_angles: np.ndarray
+
+    def to_params(self):
+        return np.concatenate([self.root.flatten(), self.euler_angles.flatten()])
+
+    @classmethod
+    def from_params(cls, params, n_joints):
+        return PoseParam(params[:3], params[3:3 * n_joints].reshape((-1, 3)))
+
+
+@dataclass
+class PoseShapeParam:
+    root: np.ndarray
+    euler_angles: np.ndarray
     bone_lens: np.ndarray
 
 
-class TrackSkeleton:
-    def __init__(self, ref_joints_offsets, joints_parents):
-        super().__init__()
-        self.ref_joints_offsets = ref_joints_offsets
-        self.joints_parents = joints_parents
-        self.n_joints = len(self.joints_parents)
-        self.cur_pose = PoseParam(root=np.zeros((3,)),
-                                  euler_angles=np.zeros((self.n_joints, 3)),
-                                  bone_lens=np.zeros((self.n_joints,)))
+@dataclass
+class Skeleton:
+    ref_joint_euler_angles: np.ndarray
+    ref_bone_lens: np.ndarray
+    ref_bone_dirs: np.ndarray
+    n_joints: int
+    joint_parents: np.ndarray
+    kps_format: KpsFormat
 
-    def optimize_pose(self, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):
-        pass
+    @property
+    def skel_kps_idx_map(self):
+        return get_kps_index(self.kps_format)
 
-    def optimize_shape(self, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):
-        pass
+    @property
+    def bone_idxs(self):
+        bone_idxs = []
+        for i, i_p in enumerate(self.joint_parents[1:]):
+            bone_idxs.append((i + 1, i_p))
+        return bone_idxs
+
+
+def foward_kinematics(skel: Skeleton, param: PoseShapeParam):
+    root_loc = param.root
+    rotations = Quaternions.from_euler(param.euler_angles)
+
+    rot_mats = rotations.transforms()
+    l_transforms = np.array([np.eye(4) for _ in range(skel.n_joints)])
+
+    offsets = bone_dir_bone_lens_to_offsets(skel.ref_bone_dirs, param.bone_lens)
+
+    for j_i in range(skel.n_joints):
+        l_transforms[j_i, :3, :3] = rot_mats[j_i]
+        if j_i != 0:
+            l_transforms[j_i, :3, 3] = offsets[j_i]
+        else:
+            if root_loc is not None:
+                l_transforms[j_i, :3, 3] = root_loc
+
+    g_transforms = l_transforms.copy()
+    for j_i in range(1, skel.n_joints):
+        g_transforms[j_i, :, :] = g_transforms[skel.joint_parents[j_i], :, :] @ l_transforms[j_i, :, :]
+
+    g_pos = g_transforms[:, :, 3]
+    g_pos = g_pos[:, :3] / g_pos[:, 3, np.newaxis]
+    return g_pos, g_transforms
+
+
+def solve_pose(skel: Skeleton,
+               obs_pose_3d: np.ndarray,
+               obs_kps_idxs: List[int],
+               skel_kps_idxs: List[int],
+               init_param: PoseShapeParam) -> PoseShapeParam:
+    init_locs, _ = foward_kinematics(skel, init_param)
+
+    target_pose_3d_shared = obs_pose_3d[obs_kps_idxs, :]
+
+    def _decompose(_x: PoseShapeParam):
+        return _x[:3], _x[3:].reshape((-1, 3))
+
+    def _compose(p: PoseShapeParam):
+        return np.concatenate([p.root.flatten(), p.euler_angles.flatten()])
+
+    def _residual_step_joints_3d(_x):
+        _root, _angles = _decompose(_x)
+        _joint_locs, _ = foward_kinematics(skel, PoseShapeParam(_root, _angles, init_param.bone_lens))
+        _joint_locs = _joint_locs[skel_kps_idxs, :]
+        _diffs = (_joint_locs - target_pose_3d_shared[:, :3]).flatten()
+        return _diffs
+
+    results = least_squares(_residual_step_joints_3d, _compose(init_param), verbose=2, max_nfev=100)
+    root, angles = _decompose(results.x)
+    return PoseShapeParam(root, angles, init_param.bone_lens)
+
+
+def solve_pose_bone_lens(skel: Skeleton,
+                         obs_pose_3d: np.ndarray,
+                         obs_kps_idxs: List[int],
+                         skel_kps_idxs: List[int],
+                         init_param: PoseShapeParam):
+    target_pose_3d_shared = obs_pose_3d[obs_kps_idxs, :]
+    n_joints = skel.n_joints
+
+    def _decompose(_x):
+        return _x[:3], _x[3:3 + n_joints * 3].reshape((-1, 3)), _x[3 + n_joints * 3:]
+
+    def _compose(p: PoseShapeParam):
+        return np.concatenate([p.root.flatten(), p.euler_angles.flatten(), p.bone_lens.flatten()])
+
+    def _residual_root_angles_bone_lens(_x):
+        _root, _angles, _blens = _decompose(_x)
+        _joint_locs, _ = foward_kinematics(skel,
+                                           PoseShapeParam(_root, _angles, _blens))
+        _joint_locs = _joint_locs[skel_kps_idxs, :]
+        _diffs = (_joint_locs - target_pose_3d_shared[:, :3]).flatten()
+        return _diffs
+
+    results = least_squares(_residual_root_angles_bone_lens, _compose(init_param), verbose=2, max_nfev=100)
+    root, angles, blens = _decompose(results.x)
+    return PoseShapeParam(root, angles, blens)
+
+
+class PoseSolver:
+    def __init__(self,
+                 skeleton: Skeleton,
+                 init_pose: Optional[PoseShapeParam],
+                 cam_poses_2d: List[np.ndarray],
+                 cam_projs: List[np.ndarray],
+                 obs_kps_format: KpsFormat):
+        self.skel = skeleton
+        self.n_joints = self.skel.n_joints
+        self.init_pose = init_pose
+        self.cam_poses_2d = cam_poses_2d
+        self.cam_projs = cam_projs
+        self.obs_kps_format = obs_kps_format
+        self.skel_kps_format = self.skel.kps_format
+        self.obs_kps_idx_map = get_kps_index(self.obs_kps_format)
+        self.skel_kps_idxs, self.obs_kps_idxs = get_common_kps_idxs(self.skel_kps_format, obs_kps_format)
+
+    def solve(self):
+        obs_pose_3d = triangulate_point_groups_from_multiple_views_linear(self.cam_projs,
+                                                                          self.cam_poses_2d, 0.01, True)
+
+        if self.init_pose is None:
+            init_root = 0.5 * (obs_pose_3d[self.obs_kps_idx_map[KpsType.L_Hip], :3] +
+                               obs_pose_3d[self.obs_kps_idx_map[KpsType.R_Hip], :3])
+            init_blens = self.skel.ref_bone_lens.copy()
+            init_angles = np.zeros((self.n_joints, 3), dtype=init_root.dtype)
+            init_param = PoseShapeParam(init_root, init_angles, init_blens)
+        else:
+            init_param = self.init_pose
+
+        param_1 = solve_pose(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, init_param)
+        param_2 = solve_pose_bone_lens(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, param_1)
+
+        pred_locs_1, _ = foward_kinematics(self.skel, param_1)
+        pred_locs_2, _ = foward_kinematics(self.skel, param_2)
+        plot_ik_result(pred_locs_1, pred_locs_2,
+                       target_pose=obs_pose_3d,
+                       bone_idxs=self.skel.bone_idxs,
+                       target_bone_idxs=None)
 
 
 def run_test_ik(target_pose_3d: np.ndarray, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):
-    in_kps_format = KpsFormat.COCO
-    my_kps_format = KpsFormat.BASIC_18
-    in_kps_idx_map = get_kps_index(in_kps_format)
+    obs_kps_format = KpsFormat.COCO
+    skel_kps_format = KpsFormat.BASIC_18
+    obs_kps_idx_map = get_kps_index(obs_kps_format)
 
-    my_kps_idxs, in_kps_idxs = get_common_kps_idxs(my_kps_format, in_kps_format)
-    cam_poses_2d_match = [pose[in_kps_idxs, :] for pose in cam_poses_2d]
-    target_pose_3d_match = target_pose_3d[in_kps_idxs, :]
+    skel_kps_idxs, obs_kps_idxs = get_common_kps_idxs(skel_kps_format, obs_kps_format)
+    cam_poses_2d_match = [pose[obs_kps_idxs, :] for pose in cam_poses_2d]
+    target_pose_3d_match = target_pose_3d[obs_kps_idxs, :]
 
     skl_offsets, skl_parents = load_skeleton()
     skl_descendants = descendants_mask(skl_parents)
@@ -212,73 +351,30 @@ def run_test_ik(target_pose_3d: np.ndarray, cam_poses_2d: List[np.ndarray], cam_
     for i, i_p in enumerate(skl_parents[1:]):
         bone_idxs.append((i + 1, i_p))
 
-    model = ForwardKinematics(skl_offsets, skl_parents)
-    n_cams = len(cam_projs)
+    skel_bdirs, skel_blens = offsets_to_bone_dirs_bone_lens(skl_offsets)
+    skel = Skeleton(ref_joint_euler_angles=np.zeros((n_joints, 3)),
+                    ref_bone_dirs=skel_bdirs,
+                    ref_bone_lens=skel_blens,
+                    joint_parents=skl_parents,
+                    n_joints=len(skl_parents),
+                    kps_format=KpsFormat.BASIC_18)
+    solver = PoseSolver(skel, init_pose=None, cam_poses_2d=cam_poses_2d, cam_projs=cam_projs,
+                        obs_kps_format=KpsFormat.COCO)
+    solver.solve()
 
-    def _residual_step_joints_3d(_x):
-        _root_pos = _x[:3]
-        _euler_angles = _x[3: n_joints * 3]
-        _joint_quars = Quaternions.from_euler(_x[3:].reshape((-1, 3)))
-        _joint_locs, _ = model.forward(_joint_quars, _root_pos, None)
-        _joint_locs = _joint_locs[my_kps_idxs, :]
-        _diffs = (_joint_locs - target_pose_3d_match).flatten()
-        return _diffs
-
-    def _residual_root_angles_bone_lens(_x):
-        _root_pos = _x[:3]
-        _joint_quars = Quaternions.from_euler(_x[3: 3 + n_joints * 3].reshape((-1, 3)))
-        _b_lens = _x[3 + n_joints * 3:]
-        _joint_locs, _ = model.forward(_joint_quars, _root_pos, _b_lens)
-        _joint_locs = _joint_locs[my_kps_idxs, :]
-        _diffs = (_joint_locs - target_pose_3d_match).flatten()
-        return _diffs
-
-    def _residual_step_2(_x):
-        _root_pos = _x[:3]
-        _joint_quars = Quaternions.from_euler(_x[3:].reshape((-1, 3)))
-        _joint_locs, _ = model.forward(_joint_quars, _root_pos)
-        _joint_locs = _joint_locs[my_kps_idxs, :]
-
-        _joint_homos = np.concatenate([_joint_locs, np.ones((_joint_locs.shape[0], 1))], axis=-1).T
-        _diff_reprojs = []
-        for _vi in range(n_cams):
-            _proj = cam_projs[_vi] @ _joint_homos
-            _proj = (_proj[:2] / _proj[2]).T
-            _d = np.linalg.norm(_proj - cam_poses_2d_match[_vi][:, :2], axis=-1)
-            _d = _d * cam_poses_2d_match[_vi][:, -1]
-            _diff_reprojs.append(_d)
-        _diff_reprojs = np.array(_diff_reprojs).flatten()
-        return _diff_reprojs
-
-    params = np.zeros((3 + np.prod(skl_offsets.shape)))
-    init_root = 0.5 * (
-            target_pose_3d[in_kps_idx_map[KpsType.L_Hip], :3] + target_pose_3d[in_kps_idx_map[KpsType.R_Hip], :3])
-    params[:3] = init_root
-
-    init_root = params[:3]
-    init_quars = Quaternions.from_euler(params[3:].reshape((-1, 3)))
-    init_locs, _ = model.forward(init_quars, init_root)
-
-    results = least_squares(_residual_step_joints_3d, params, verbose=2, max_nfev=100)
-    params_1 = results.x
-    pred_root_1 = params_1[:3]
-    pred_quars_1 = Quaternions.from_euler(params_1[3:].reshape((-1, 3)))
-    pred_locs_1, _ = model.forward(pred_quars_1, pred_root_1)
-
-    params_2 = np.zeros((3 + 3 * n_joints + n_joints))
-    params_2[:3 + 3 * n_joints] = params_1
-    params_2[3 + 3 * n_joints:] = model.ref_bone_lens.copy()
-    results = least_squares(_residual_root_angles_bone_lens, params_2, verbose=2, max_nfev=100)
-    params_2 = results.x
-    pred_root_2 = params_2[:3]
-    pred_quars_2 = Quaternions.from_euler(params_2[3:3 + 3 * n_joints].reshape((-1, 3)))
-    pred_blens_2 = params_2[3 + 3 * n_joints: 3 + 3 * n_joints + n_joints]
-    pred_locs_2, _ = model.forward(pred_quars_2, pred_root_2, pred_blens_2)
-
-    # results = least_squares(_residual_step_2, params_1, verbose=2, max_nfev=100)
-    # params_2 = results.x
-    # pred_root_2 = params_2[:3]
-    # pred_quars_2 = Quaternions.from_euler(params_2[3:].reshape((-1, 3)))
-    # pred_locs_2, _ = model.forward(pred_quars_2, pred_root_2)
-
-    plot_ik_result(pred_locs_1, pred_locs_2, target_pose=target_pose_3d, bone_idxs=bone_idxs, target_bone_idxs=None)
+    # def _residual_step_2(_x):
+    #     _root_pos = _x[:3]
+    #     _joint_quars = Quaternions.from_euler(_x[3:].reshape((-1, 3)))
+    #     _joint_locs, _ = model.forward(_joint_quars, _root_pos)
+    #     _joint_locs = _joint_locs[skel_kps_idxs, :]
+    #
+    #     _joint_homos = np.concatenate([_joint_locs, np.ones((_joint_locs.shape[0], 1))], axis=-1).T
+    #     _diff_reprojs = []
+    #     for _vi in range(n_cams):
+    #         _proj = cam_projs[_vi] @ _joint_homos
+    #         _proj = (_proj[:2] / _proj[2]).T
+    #         _d = np.linalg.norm(_proj - cam_poses_2d_match[_vi][:, :2], axis=-1)
+    #         _d = _d * cam_poses_2d_match[_vi][:, -1]
+    #         _diff_reprojs.append(_d)
+    #     _diff_reprojs = np.array(_diff_reprojs).flatten()
+    #     return _diff_reprojs

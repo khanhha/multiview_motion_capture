@@ -176,7 +176,7 @@ def homogeneous_to_euclidean(points):
         raise TypeError("Works only with numpy arrays and PyTorch tensors.")
 
 
-def triangulate_point_groups_from_multiple_views_linear(proj_matricies: np.ndarray,
+def triangulate_point_groups_from_multiple_views_linear(proj_matricies: List[np.ndarray],
                                                         points_grps: List[np.ndarray],
                                                         min_score,
                                                         post_optimize=False,
@@ -185,7 +185,7 @@ def triangulate_point_groups_from_multiple_views_linear(proj_matricies: np.ndarr
     :param n_max_iter:
     :param min_score: just apply triangulation on keypoints whose scores greater than this value. if no valid keypoints
     exist, resort to all keypoints
-    :param proj_matricies: (N,3,4): sequence of projection matrices
+    :param proj_matricies: List[(3,4)]: sequence of projection matrices
     :param points_grps: List[Nx3]
     :param post_optimize:
     """
@@ -197,7 +197,7 @@ def triangulate_point_groups_from_multiple_views_linear(proj_matricies: np.ndarr
         for grp_idx, grp in enumerate(points_grps):
             if grp[kps_idx, 2] >= min_score:
                 points_2d.append(grp[kps_idx, :])
-                cams_p.append(proj_matricies[grp_idx, :])
+                cams_p.append(proj_matricies[grp_idx])
 
         if len(points_2d) < 2:
             # if not enough points are collected. resort to all points
@@ -206,7 +206,6 @@ def triangulate_point_groups_from_multiple_views_linear(proj_matricies: np.ndarr
             cams_p = proj_matricies
         else:
             points_2d = np.array(points_2d)
-            cams_p = np.array(cams_p)
             score = np.mean(points_2d[:, 2])
 
         point_3d = triangulate_point_from_multiple_views_linear(cams_p, points_2d[:, :2])
@@ -237,7 +236,7 @@ def triangulate_point_groups_from_multiple_views_linear(proj_matricies: np.ndarr
     return kps_3ds
 
 
-def triangulate_point_from_multiple_views_linear(proj_matricies: np.ndarray, points: np.ndarray):
+def triangulate_point_from_multiple_views_linear(proj_matricies: List[np.ndarray], points: np.ndarray):
     """Triangulates one point from multiple (N) views using direct linear transformation (DLT).
     For more information look at "Multiple view geometry in computer vision",
     Richard Hartley and Andrew Zisserman, 12.2 (p. 312).

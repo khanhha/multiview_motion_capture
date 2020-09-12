@@ -27,6 +27,7 @@ from mv_math_util import (Calib, calc_epipolar_error, triangulate_point_groups_f
                           points_to_lines_distances)
 from pose_viz import plot_poses_3d
 from enum import Enum
+from inverse_kinematics import PoseParam, Skeleton
 
 matplotlib.use('Qt5Agg')
 
@@ -280,7 +281,8 @@ def triangulate_util(cam_poses: List[Pose], cam_projs: List[np.ndarray], min_tri
 
 
 class MvTracklet:
-    def __init__(self, frm_idx: int,
+    def __init__(self,
+                 frm_idx: int,
                  cam_poses_2d: List[Pose],
                  cam_projs: List[np.ndarray],
                  n_inits: int = 3,
@@ -289,6 +291,9 @@ class MvTracklet:
         self.poses_3d: List[Pose] = [triangulate_util(cam_poses_2d, cam_projs)]
         self.cam_poses_2d: List[List[Pose]] = [cam_poses_2d]
         self.cam_projs: List[List[np.ndarray]] = [cam_projs]
+
+        self.bone_lengs: np.ndarray
+        self.poses: List[PoseParam]
 
         self.time_since_update = 0
         self.hits = 1
