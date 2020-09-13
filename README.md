@@ -38,12 +38,12 @@ can be run in real-time, but for the sake of debugging, it's more convenient to 
 python ./motion_capture.py --mode prepare --opn_kps_dir ./data/shelf/kps_opn --calib_dir ./data/shelf/calibs --out_data_dir ./data/shelf/dframes/
 ```
 
-- run cross-view tracking and inverse kinematics
+- __cross-view tracking and inverse kinematics__
 ```
 python ./motion_capture.py --model run --video_dir ./data/shelf/videos --data_dir ./data/shelf/dframes --output_dir ./data/shelf/tracklets/
 ```
 
-- visualize the captured animation
+- __visualize__ the captured animation
 ```
 python ./motion_capture.py --tlet_path ./data/shelf/tracklets/tracklets.pkl
 ```
