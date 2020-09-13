@@ -11,6 +11,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import mpl_toolkits.mplot3d.axes3d as p3
 import matplotlib.animation as animation
+import argparse
 from dataclasses import dataclass, field
 import json
 import matplotlib.pyplot as plt
@@ -550,36 +551,52 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     all_tlets = tracker.tracklets + tracker.dead_tracklets
     all_tlets = sorted(all_tlets, key=lambda tlet: -len(tlet))
 
-    with open('./traclets_shelf.pkl', 'wb') as file:
+    with open(f'{out_dir}/traclets_shelf.pkl', 'wb') as file:
         pickle.dump(file=file, obj={"tracklets": all_tlets})
 
     for tlet in all_tlets:
         poses_3d = [p[-1] for p in tlet.poses]
-        plot_poses_3d(poses_3d, '/media/F/thesis/data/test_mv/2_pp/test_tracklet.mp4')
+        plot_poses_3d(poses_3d)
 
 
-def test_viz_tracklets():
-    with open('./traclets.pkl', 'rb') as file:
+def viz_tracklets(in_tracklet_path):
+    with open(in_tracklet_path, 'rb') as file:
         all_tlets = pickle.load(file)
         for tlet in all_tlets:
             poses_3d = [p[-1] for p in tlet.poses]
-            plot_poses_3d(poses_3d, '/media/F/thesis/data/test_mv/2_pp/test_tracklet.mp4')
+            plot_poses_3d(poses_3d)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', type=str, choices=['prepare', 'run', 'viz'],
+                        help='run motion capture or prepare pre-generated data')
+
+    parser.add_argument('--tlet_path', type=str, default='./tracklets.pkl',
+                        help='tracklet pkl path that you want to visualize')
+
+    parser.add_argument('--video_dir', type=str, default='', help='video directory')
+    parser.add_argument('--data_dir', type=str, default='', help='pre-generated data directory')
+    parser.add_argument('--output_dir', type=str, default='', help='output directory')
+
+    parser.add_argument('--opn_kps_dir', type=str, default='',
+                        help='openpose keypoints directory. each sub folder inside'
+                             'this folder should contains keypoints corresponing videos')
+    parser.add_argument('--calib_dir', type=str, default='', help='calibration directory')
+    parser.add_argument('--out_data_dir', type=str, default='', help='output  data directory')
+
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    # test_viz_tracklets()
-    run_main(video_dir=Path('/media/F/datasets/shelf/video'),
-             pose_dir=Path('/media/F/datasets/shelf/dframes'),
-             out_dir=Path('/media/F/thesis/data/test_mv/2_pp_heatmaps'))
-
-    # extract_frame_data_from_videos(
-    #     in_dir=Path('/media/F/thesis/data/test_mv/2_pp/videos'),
-    #     calib_dir=Path('/media/F/thesis/data/test_mv/2_pp/calibs'),
-    #     out_pose_dir=Path('/media/F/thesis/data/test_mv/2_pp/poses'))
-
-    # extract_frame_data_from_openpose(in_dir=Path('/media/F/thesis/data/test_mv/2_pp/openpose_keypoints'),
-    #                                  calib_dir=Path('/media/F/thesis/data/test_mv/2_pp/calibs'),
-    #                                  out_data_dir=Path('/media/F/thesis/data/test_mv/2_pp/d_frames_coco'))
-    # extract_frame_data_from_openpose(in_dir=Path('/media/F/datasets/shelf/kps_opn'),
-    #                                  calib_dir=Path('/media/F/datasets/shelf/calib'),
-    #                                  out_data_dir=Path('/media/F/datasets/shelf/dframes'))
+    args = parse_args()
+    if args.mode == 'run':
+        run_main(video_dir=Path(args.video_dir),
+                 pose_dir=Path(args.data_dir),
+                 out_dir=Path(args.output_dir))
+    elif args.mode == 'prepare':
+        extract_frame_data_from_openpose(in_dir=Path(args.opn_kps_dir),
+                                         calib_dir=Path(args.calib_dir),
+                                         out_data_dir=Path(args.out_data_dir))
+    elif args.mode == 'viz':
+        viz_tracklets(args.tlet_path)

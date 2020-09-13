@@ -12,7 +12,7 @@ from pose_def import get_pose_bones_index, Pose
 matplotlib.use('Qt5Agg')
 
 
-def plot_poses_3d(poses_3d: List[Pose], out_video: Path, fps=24):
+def plot_poses_3d(poses_3d: List[Pose], fps=24):
     # Attaching 3D axis to the figure
     fig = plt.figure()
     ax = p3.Axes3D(fig)
