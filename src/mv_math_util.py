@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Tuple
 from dataclasses import dataclass
 import cv2
 import numpy as np
@@ -12,6 +12,7 @@ class Calib:
     Rt: np.ndarray  # 3x4
     P: np.ndarray  # 3x4
     Kr_inv: np.ndarray  # 3x3
+    img_wh_size: Tuple[int, int]
 
     @property
     def cam_loc(self):
@@ -85,10 +86,6 @@ def get_fundamental_matrix(p1, p2):
             xy = np.vstack([x[j], y[i]])
             f_mat[i, j] = np.linalg.det(xy)
     return f_mat
-
-
-def line_to_point_distance(a, b, c, x, y):
-    return abs(a * x + b * y + c) / np.sqrt(a ** 2 + b ** 2)
 
 
 def calc_epipolar_error(cam1: Calib, keypoints_1: np.ndarray, scores_1: np.ndarray,

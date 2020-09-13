@@ -242,7 +242,16 @@ def load_calib(cpath: Path):
             data["P"] = mat_p
 
             kr_inv = mat_rt[:3, :3].transpose() @ np.linalg.inv(mat_k)
-            return Calib(K=mat_k, Rt=mat_rt, P=mat_p, Kr_inv=kr_inv)
+            return Calib(K=mat_k, Rt=mat_rt, P=mat_p, Kr_inv=kr_inv, img_wh_size=(1920, 1080))
+    elif 'js' in cpath.suffix:
+        with open(str(cpath), 'r') as file:
+            js_data = json.load(file)
+            mat_k = np.array(js_data["K"]).reshape((3, 3))
+            mat_rt = np.array(js_data["RT"]).reshape((3, 4))
+            mat_p = mat_k @ mat_rt
+            img_size = js_data["imgSize"]
+            kr_inv = mat_rt[:3, :3].transpose() @ np.linalg.inv(mat_k)
+            return Calib(K=mat_k, Rt=mat_rt, P=mat_p, Kr_inv=kr_inv, img_wh_size=img_size)
     else:
         raise ValueError(f'unsupported calibration format. {cpath.name}')
 
@@ -397,17 +406,18 @@ class MvTracker:
             tlet.predict()
 
         # only do association with alive tracks
-        cur_tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
+        alive_tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
 
-        tlet_matches = [TrackletMatch() for _ in range(len(cur_tracklets))]
+        # matching between each 3d tracklet and 2d poses in different views
+        tlet_matches = [TrackletMatch() for _ in range(len(alive_tracklets))]
         for vi in range(n_views):
-            matches = self.tracklet_to_poses_association(cur_tracklets, d_frames[vi])
+            matches = self.tracklet_to_poses_association(alive_tracklets, d_frames[vi])
             for t_idx, p_id in matches:
                 tlet_matches[t_idx].view_idxs.append(vi)
                 tlet_matches[t_idx].pose_ids.append(p_id)
 
         # update tracks with associated detections
-        for tlet, tlet_match in zip(cur_tracklets, tlet_matches):
+        for tlet, tlet_match in zip(alive_tracklets, tlet_matches):
             if len(tlet_match) >= 2:
                 tlet.update(frm_idx, tlet_match, d_frames)
             else:
@@ -465,7 +475,8 @@ def parse_openpose_kps(js_path: Path):
 def extract_frame_data_from_openpose(in_dir: Path, calib_dir: Path, out_data_dir: Path):
     # sorted based on camera number
     cam_opn_dirs = sorted([ddir for ddir in in_dir.glob('*') if ddir.is_dir()], key=lambda path: path.stem)
-    calibs = [load_calib(calib_dir / f'{vpath.stem}.pkl') for vpath in cam_opn_dirs]
+    calib_paths = {cpath.stem: cpath for cpath in calib_dir.glob('*.*')}
+    calibs = [load_calib(calib_paths[vpath.stem]) for vpath in cam_opn_dirs]
 
     cam_kps_paths = []
     for kps_dir in cam_opn_dirs:
@@ -507,7 +518,8 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     skeleton = load_skeleton()
     tracker = MvTracker(skeleton)
     frm_idx = 0
-    n_test = 10
+    n_test = 1000
+    n_test = min(len(frm_pose_paths), n_test)
     with tqdm(total=len(frm_pose_paths), desc='tracking') as bar:
         while True:
             bar.update()
@@ -536,19 +548,30 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     db_writer.close()
 
     all_tlets = tracker.tracklets + tracker.dead_tracklets
-    all_tlets = sorted(all_tlets, key=lambda tlet: -len(tlet.poses_3d))
-    all_tlets = all_tlets[:2]
+    all_tlets = sorted(all_tlets, key=lambda tlet: -len(tlet))
 
-    test_ik_tlet(all_tlets[0])
+    with open('./traclets_shelf.pkl', 'wb') as file:
+        pickle.dump(file=file, obj={"tracklets": all_tlets})
 
-    poses_3d = [p for p in all_tlets[0].poses_3d]
-    plot_poses_3d(poses_3d, '/media/F/thesis/data/test_mv/2_pp/test_tracklet.mp4')
+    for tlet in all_tlets:
+        poses_3d = [p[-1] for p in tlet.poses]
+        plot_poses_3d(poses_3d, '/media/F/thesis/data/test_mv/2_pp/test_tracklet.mp4')
+
+
+def test_viz_tracklets():
+    with open('./traclets.pkl', 'rb') as file:
+        all_tlets = pickle.load(file)
+        for tlet in all_tlets:
+            poses_3d = [p[-1] for p in tlet.poses]
+            plot_poses_3d(poses_3d, '/media/F/thesis/data/test_mv/2_pp/test_tracklet.mp4')
 
 
 if __name__ == "__main__":
-    run_main(video_dir=Path('/media/F/thesis/data/test_mv/2_pp/videos'),
-             pose_dir=Path('/media/F/thesis/data/test_mv/2_pp/d_frames_coco'),
+    # test_viz_tracklets()
+    run_main(video_dir=Path('/media/F/datasets/shelf/video'),
+             pose_dir=Path('/media/F/datasets/shelf/dframes'),
              out_dir=Path('/media/F/thesis/data/test_mv/2_pp_heatmaps'))
+
     # extract_frame_data_from_videos(
     #     in_dir=Path('/media/F/thesis/data/test_mv/2_pp/videos'),
     #     calib_dir=Path('/media/F/thesis/data/test_mv/2_pp/calibs'),
@@ -557,3 +580,6 @@ if __name__ == "__main__":
     # extract_frame_data_from_openpose(in_dir=Path('/media/F/thesis/data/test_mv/2_pp/openpose_keypoints'),
     #                                  calib_dir=Path('/media/F/thesis/data/test_mv/2_pp/calibs'),
     #                                  out_data_dir=Path('/media/F/thesis/data/test_mv/2_pp/d_frames_coco'))
+    # extract_frame_data_from_openpose(in_dir=Path('/media/F/datasets/shelf/kps_opn'),
+    #                                  calib_dir=Path('/media/F/datasets/shelf/calib'),
+    #                                  out_data_dir=Path('/media/F/datasets/shelf/dframes'))

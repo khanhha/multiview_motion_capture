@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pose_def import KpsType, get_parent_index, KpsFormat, get_common_kps_idxs, get_kps_index, Pose
 from mv_math_util import triangulate_point_groups_from_multiple_views_linear
 
+solver_verbose = 0
 matplotlib.use('Qt5Agg')
 
 
@@ -211,7 +212,7 @@ def solve_pose(skel: Skeleton,
         _diffs = _diffs * target_pose_3d_shared[:, -1:]
         return _diffs.flatten()
 
-    results = least_squares(_residual_step_joints_3d, _compose(init_param), verbose=2, max_nfev=100)
+    results = least_squares(_residual_step_joints_3d, _compose(init_param), verbose=solver_verbose, max_nfev=15)
     root, angles = _decompose(results.x)
     return PoseShapeParam(root, angles, init_param.bone_lens)
 
@@ -239,7 +240,7 @@ def solve_pose_bone_lens(skel: Skeleton,
         _diffs = _diffs * target_pose_3d_shared[:, -1:]
         return _diffs.flatten()
 
-    results = least_squares(_residual_root_angles_bone_lens, _compose(init_param), verbose=2, max_nfev=100)
+    results = least_squares(_residual_root_angles_bone_lens, _compose(init_param), verbose=solver_verbose, max_nfev=15)
     root, angles, blens = _decompose(results.x)
     return PoseShapeParam(root, angles, blens)
 
@@ -279,13 +280,13 @@ class PoseSolver:
 
         pred_locs_1, _ = foward_kinematics(self.skel, param_1)
         pred_locs_2, _ = foward_kinematics(self.skel, param_2)
-        plot_ik_result(pred_locs_1, pred_locs_2,
-                       target_pose=obs_pose_3d,
-                       bone_idxs=self.skel.bone_idxs,
-                       target_bone_idxs=None)
+        # plot_ik_result(pred_locs_1, pred_locs_2,
+        #                target_pose=obs_pose_3d,
+        #                bone_idxs=self.skel.bone_idxs,
+        #                target_bone_idxs=None)
 
-        return param_2, Pose(keypoints=pred_locs_1,
-                             keypoints_score=np.zeros((len(pred_locs_1), 1)),
+        return param_2, Pose(keypoints=pred_locs_2,
+                             keypoints_score=np.zeros((len(pred_locs_2), 1)),
                              box=None,
                              pose_type=KpsFormat.BASIC_18)
 

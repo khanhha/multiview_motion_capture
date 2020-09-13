@@ -224,6 +224,8 @@ _BASIC_18_Index = {jtype: jidx for jidx, jtype in enumerate(_BASIC_18)}
 _BASIC_18_PARENTS_Index = [_BASIC_18_Index[_BASIC_18_PARENTS[jtype]] if _BASIC_18_PARENTS[jtype] != jtype else -1 for
                            jtype in
                            _BASIC_18]
+_BASIC_18_Bone_Index = [(kps_idx, _BASIC_18_PARENTS_Index[kps_idx])
+                        for kps_idx in range(len(_BASIC_18)) if _BASIC_18_PARENTS_Index[kps_idx] >= 0]
 
 
 def conversion_openpose_25_to_coco(poses_openpose):
@@ -260,8 +262,10 @@ def get_pose_bones_index(p_type):
         return _COCO_Bone_Index
     elif p_type == KpsFormat.SMPLX_22:
         return _SMPLX_22_Bone_Index
+    elif p_type == KpsFormat.BASIC_18:
+        return _BASIC_18_Bone_Index
     else:
-        raise ValueError('get_pose_bones_index')
+        raise ValueError(f'get_pose_bones_index: {p_type}')
 
 
 def get_kps_order(p_type):
