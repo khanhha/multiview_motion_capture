@@ -131,11 +131,12 @@ def calc_epipolar_error(cam1: Calib, keypoints_1: np.ndarray, scores_1: np.ndarr
             l2to1 = epilines_2to1[i, :]
             d1 = line_to_point_distance(*l1to2, *p2)
             d2 = line_to_point_distance(*l2to1, *p1)
-            total = total + (d1 + d2) * kps_cost_factor[i]
+            # total = total + (d1 + d2) * kps_cost_factor[i]
+            total = total + 0.5 * (d1 + d2)
 
-        total_score = max(float(np.sum(kps_cost_factor)), 1e-5)
-        total = total / total_score  # normalize
-
+        # total_score = max(float(np.sum(kps_cost_factor)), 1e-5)
+        # total = total / total_score  # normalize
+        total = total / n_joint
     return total
 
 

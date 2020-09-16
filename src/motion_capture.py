@@ -134,24 +134,34 @@ class PoseAssociation:
             v_id = self.view_ids[idx]
             pose = self.id_poses[idx][1]
             img = view_imgs[v_id]
-            x1, y1, x2, y2 = pose.box.astype(np.int)
-            crop = img[y1:y2, x1:x2]
-            c_h, c_w = crop.shape[:2]
-            new_h = h
-            new_w = int((c_w / c_h) * new_h)
-            crop = cv2.resize(crop, dsize=(new_w, new_h))
-            cv2.putText(crop, f'{v_id}', (int(0.5 * new_w), 128),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), thickness=2)
-            all_crops.append(crop)
+            if pose.box is not None:
+                x1, y1, x2, y2 = pose.box.astype(np.int)
+            else:
+                valid_kps = pose.keypoints[pose.keypoints_score.flatten() > 0.1, :]
+                bmin, bmax = np.min(valid_kps, axis=0), np.max(valid_kps, axis=0)
+                x1, y1, x2, y2 = np.concatenate([bmin, bmax]).astype(np.int)
+
+            if y2 > y1 + 5 and x2 > x1 + 5:
+                crop = img[y1:y2, x1:x2]
+                c_h, c_w = crop.shape[:2]
+                new_h = h
+                new_w = int((c_w / c_h) * new_h)
+                crop = cv2.resize(crop, dsize=(new_w, new_h))
+                cv2.putText(crop, f'{v_id}', (int(0.5 * new_w), 128),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), thickness=2)
+                all_crops.append(crop)
 
         # view_id increasing from left to right
-        sorted_view_ids = np.argsort(self.view_ids)
-        all_crops = [all_crops[idx] for idx in sorted_view_ids]
+        if all_crops:
+            # sorted_view_ids = np.argsort(self.view_ids)
+            # all_crops = [all_crops[idx] for idx in sorted_view_ids]
 
-        viz = np.concatenate(all_crops, axis=1)
-        cv2.putText(viz, f'{self.frame_idx}', (25, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), thickness=2)
-        return viz
+            viz = np.concatenate(all_crops, axis=1)
+            cv2.putText(viz, f'{self.frame_idx}', (25, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), thickness=2)
+            return viz
+        else:
+            return np.zeros((128, 128, 3), dtype=np.uint8)
 
 
 def match_objects_across_views(frame_idx: int,
@@ -401,7 +411,7 @@ class MvTracker:
         else:
             return []
 
-    def update(self, frm_idx: int, d_frames: List[FrameData]):
+    def update(self, frm_idx: int, d_frames: List[FrameData], debug_view_imgs: Dict[int, np.ndarray]):
         n_views = len(d_frames)
         for tlet in self.tracklets:
             tlet.predict()
@@ -436,15 +446,49 @@ class MvTracker:
             for p_id in view_matched_pids[v_idx]:
                 del frm.poses[p_id]
 
+        # test mv matching
+        # from mv_association import match_multiview_poses
+        # cams_poses_ids = [[p_id for p_id in frm.poses.keys()]
+        #                   for frm in new_d_frames]
+        # cams_poses = [[new_d_frames[cam_idx].poses[p_id] for p_id in p_ids]
+        #               for cam_idx, p_ids in enumerate(cams_poses_ids)]
+        # cams_calibs = [frm.calib
+        #                for frm in new_d_frames]
+        # person_matches = match_multiview_poses(cams_poses, cams_calibs)
+        # pose_grps = []
+        # for grp_cam_pose_idxs in person_matches:
+        #     grp = None
+        #     for cam_idx, p_idx in grp_cam_pose_idxs:
+        #         calib = cams_calibs[cam_idx]
+        #         p_id = cams_poses_ids[cam_idx][p_idx]
+        #         pose = cams_poses[cam_idx][p_idx]
+        #         if grp is None:
+        #             grp = PoseAssociation(cam=calib, frame_idx=frm_idx, view_id=cam_idx, id_obj=(p_id, pose),
+        #                                   use_weighted_kps_score=True,
+        #                                   match_threshold=12,
+        #                                   min_triangulate_kps_score=0.1)
+        #         else:
+        #             grp.cams.append(calib)
+        #             grp.view_ids.append(cam_idx)
+        #             grp.id_poses.append((p_id, pose))
+        #     pose_grps.append(grp)
+
+        # debug
         pose_grps = match_objects_across_views(frame_idx=frm_idx, view_frames=new_d_frames,
                                                use_kps_weighted_score=True, match_threshold=12,
                                                min_triangulate_kps_score=0.1)
         for grp in pose_grps:
             if len(grp) >= 2:
-                p_3d_co = grp.triangulate()
-                p_3d = Pose(grp.poses[0].pose_type, p_3d_co[:, :3], p_3d_co[:, -1][:, np.newaxis], box=None)
+                # p_3d_co = grp.triangulate()
+                # p_3d = Pose(grp.poses[0].pose_type, p_3d_co[:, :3], p_3d_co[:, -1][:, np.newaxis], box=None)
                 tlet = MvTracklet(frm_idx, cam_poses_2d=grp.poses, cam_projs=grp.cam_projs, skel=self.skeleton)
                 self.tracklets.append(tlet)
+                #
+                # viz = grp.debug_get_association_viz(debug_view_imgs)
+                # cv2.imshow('test', viz)
+                # k = cv2.waitKeyEx(1)
+                # while k != ord('n'):
+                #     k = cv2.waitKeyEx(1)
 
         # filter out dead tracks
         dead_tlets = [tlet for tlet in self.tracklets if tlet.is_dead()]
@@ -526,12 +570,17 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
             bar.update()
             bar.set_description(
                 f'tracking. n_dead = {len(tracker.dead_tracklets)}. n_tracks = {len(tracker.tracklets)}')
-            # oks_frames = [vreader.read() for vreader in vreaders]
-            # is_oks, org_frames = list(zip(*oks_frames))
-            # if not all(is_oks) or frm_idx >= len(frm_pose_paths):
-            #     break
+            oks_frames = [vreader.read() for vreader in vreaders]
+            is_oks, org_frames = list(zip(*oks_frames))
+            if not all(is_oks) or frm_idx >= len(frm_pose_paths):
+                break
+            org_frames = {view_idx: frm for view_idx, frm in enumerate(org_frames)}
 
             d_frames = load_pickle(frm_pose_paths[frm_idx], 'rb')
+            frm_idx += 1
+
+            # if frm_idx < 90:
+            #     continue
 
             # for frm_img, frm_data in zip(org_frames, d_frames):
             #     draw_poses(frm_img, frm_data)
@@ -540,8 +589,43 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
             #     cv2.imshow(f'{i}', frm_img)
             # cv2.waitKeyEx(1)
 
-            tracker.update(frm_idx, d_frames)
-            frm_idx += 1
+            from mv_association import match_multiview_poses
+            cams_poses_ids = [[p_id for p_id in frm.poses.keys()]
+                              for frm in d_frames]
+            cams_poses = [[d_frames[cam_idx].poses[p_id] for p_id in p_ids]
+                          for cam_idx, p_ids in enumerate(cams_poses_ids)]
+            cams_calibs = [frm.calib
+                           for frm in d_frames]
+            person_matches = match_multiview_poses(cams_poses, cams_calibs)
+            pose_grps = []
+            for grp_cam_pose_idxs in person_matches:
+                grp = None
+                for cam_idx, p_idx in grp_cam_pose_idxs:
+                    calib = cams_calibs[cam_idx]
+                    p_id = cams_poses_ids[cam_idx][p_idx]
+                    pose = cams_poses[cam_idx][p_idx]
+                    if grp is None:
+                        grp = PoseAssociation(cam=calib, frame_idx=frm_idx, view_id=cam_idx, id_obj=(p_id, pose),
+                                              use_weighted_kps_score=True,
+                                              match_threshold=12,
+                                              min_triangulate_kps_score=0.1)
+                    else:
+                        grp.cams.append(calib)
+                        grp.view_ids.append(cam_idx)
+                        grp.id_poses.append((p_id, pose))
+                pose_grps.append(grp)
+
+            debug_img_dir = '/media/F/thesis/data/debug/mv_association'
+            os.makedirs(debug_img_dir, exist_ok=True)
+            for p_id, grp in enumerate(pose_grps):
+                viz = grp.debug_get_association_viz(org_frames)
+                cv2.imwrite(f'{debug_img_dir}/{frm_idx}_{p_id}.jpg', viz)
+                # cv2.imshow('test', viz)
+                # k = cv2.waitKeyEx(1)
+                # while k != ord('n'):
+                #     k = cv2.waitKeyEx(1)
+
+            # tracker.update(frm_idx, d_frames, debug_view_imgs=org_frames)
 
             if frm_idx >= n_test:
                 break
