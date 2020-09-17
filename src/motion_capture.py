@@ -245,6 +245,12 @@ def match_objects_across_views(frame_idx: int,
     return mv_obj_grps
 
 
+def pose_to_bb(pose: Pose, min_valid_kps=0.1):
+    valid_kps = pose.keypoints[pose.keypoints_score.flatten() > min_valid_kps, :]
+    bmin, bmax = np.min(valid_kps, axis=0), np.max(valid_kps, axis=0)
+    return np.concatenate([bmin, bmax])
+
+
 def load_calib(cpath: Path):
     if 'pkl' in cpath.suffix:
         with open(str(cpath), 'rb') as file:
@@ -429,7 +435,10 @@ class SpatialTimeMatch:
     spatial_matches: List[SpatialMatch]  # view poses with view poses
 
 
-def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> SpatialTimeMatch:
+g_cur_frame_images: Dict[int, np.ndarray] = {}
+
+
+def match_spatial(frames: List[FrameData]) -> SpatialTimeMatch:
     cam_poses_id = [[pose for pose in frm.poses.keys()]
                     for frm in frames]
     cams_poses = [[frames[cam_idx].poses[p_id] for p_id in pose_ids]
@@ -437,118 +446,135 @@ def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> Spat
     cams_calib = [frm.calib for frm in frames]
     pairwise_f_mats = calc_pairwise_f_mats(cams_calib)
 
+    points_set = []
+    dim_groups = [0]
+    cnt = 0
+    for poses in cams_poses:
+        cnt += len(poses)
+        dim_groups.append(cnt)
+        for p in poses:
+            points_set.append(p.keypoints)
+    points_set = np.array(points_set)
+    # build matrix
+    s_mat = geometry_affinity(points_set, pairwise_f_mats, dim_groups)
+    match_mat = match_als(s_mat, dim_groups)
+    dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
+
+    out_matches = SpatialTimeMatch({}, [])
+    for grp_cam_pose_idxs in dim_groups_matches:
+        s_match = SpatialMatch([], [])
+        for cam_idx, p_idx, _ in grp_cam_pose_idxs:
+            s_match.view_idxs.append(cam_idx)
+            s_match.pose_ids.append(cam_poses_id[cam_idx][p_idx])
+        out_matches.spatial_matches.append(s_match)
+
+    return out_matches
+
+
+def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> SpatialTimeMatch:
+    cam_poses_id = [[pose for pose in frm.poses.keys()]
+                    for frm in frames]
+    cams_poses = [[frames[cam_idx].poses[p_id] for p_id in pose_ids]
+                  for cam_idx, pose_ids in enumerate(cam_poses_id)]
+    cams_calib = [frm.calib for frm in frames]
+
     out_matches = SpatialTimeMatch({}, [])
 
-    if tlets:
-        poses_3ds_2ds: List[Pose] = [tlet.last_pose_3d for tlet in tlets]
-        pose_mask = ['3d'] * len(tlets)
-        mat_idx_to_cam_idxs = [-1] * len(tlets)
-        mat_idx_to_tracklet_ids = [tlet_idx for tlet_idx in range(len(tlets))]
-        mat_idx_to_poses_2d_ids = [-1] * len(tlets)
-        part_lens = [0, len(tlets)]
-        for cam_idx, poses in enumerate(cams_poses):
-            poses_3ds_2ds.extend(poses)
-            pose_mask.extend(['2d'] * len(poses))
-            part_lens.append(len(poses))
-            mat_idx_to_cam_idxs.extend([cam_idx] * len(poses))
-            mat_idx_to_tracklet_ids.extend([-1] * len(poses))
-            mat_idx_to_poses_2d_ids.extend(cam_poses_id[cam_idx])
+    poses_3ds_2ds: List[Pose] = [tlet.last_pose_3d for tlet in tlets]
+    pose_mask = ['3d'] * len(tlets)
+    mat_idx_to_cam_idxs = [-1] * len(tlets)
+    mat_idx_to_tracklet_ids = [tlet_idx for tlet_idx in range(len(tlets))]
+    mat_idx_to_poses_2d_ids = [-1] * len(tlets)
+    part_lens = [0, len(tlets)]
+    for cam_idx, poses in enumerate(cams_poses):
+        poses_3ds_2ds.extend(poses)
+        pose_mask.extend(['2d'] * len(poses))
+        part_lens.append(len(poses))
+        mat_idx_to_cam_idxs.extend([cam_idx] * len(poses))
+        mat_idx_to_tracklet_ids.extend([-1] * len(poses))
+        mat_idx_to_poses_2d_ids.extend(cam_poses_id[cam_idx])
 
-        dim_groups = np.cumsum(part_lens).tolist()
+    dim_groups = np.cumsum(part_lens).tolist()
 
-        n_poses = len(poses_3ds_2ds)
-        dst_mat = np.zeros((n_poses, n_poses), dtype=np.float)
-        for i in range(n_poses):
-            for j in range(n_poses):
-                # same pose
-                if i == j:
-                    continue
-                # same view
-                if mat_idx_to_cam_idxs[i] >= 0 and mat_idx_to_cam_idxs[i] == mat_idx_to_cam_idxs[j]:
-                    continue
+    n_poses = len(poses_3ds_2ds)
+    dst_mat = np.zeros((n_poses, n_poses), dtype=np.float)
+    for i in range(n_poses):
+        for j in range(n_poses):
+            # same pose
+            if i == j:
+                continue
+            # same view
+            if mat_idx_to_cam_idxs[i] >= 0 and mat_idx_to_cam_idxs[i] == mat_idx_to_cam_idxs[j]:
+                continue
 
-                if pose_mask[i] == '2d' and pose_mask[j] == '2d':
-                    # epipolar error
-                    assert mat_idx_to_cam_idxs[i] >= 0 and mat_idx_to_cam_idxs[j] >= 0
-                    i_calib = cams_calib[mat_idx_to_cam_idxs[i]]
-                    j_calib = cams_calib[mat_idx_to_cam_idxs[j]]
-                    i_pose = poses_3ds_2ds[i]
-                    j_pose = poses_3ds_2ds[j]
-                    e_error = calc_epipolar_error(i_calib, i_pose.keypoints, i_pose.keypoints_score,
-                                                  j_calib, j_pose.keypoints, j_pose.keypoints_score,
-                                                  True)
-                    dst_mat[i, j] = e_error
-                elif pose_mask[i] == '2d' and pose_mask[j] == '3d':
-                    # re-projection error
-                    p_2d = poses_3ds_2ds[i]
-                    calib = cams_calib[mat_idx_to_cam_idxs[i]]
-                    p_3d = poses_3ds_2ds[j]
-                    e_error = reprojection_error(p_3d, p_2d, calib, True)
-                    dst_mat[i, j] = e_error
+            if pose_mask[i] == '2d' and pose_mask[j] == '2d':
+                # epipolar error
+                assert mat_idx_to_cam_idxs[i] >= 0 and mat_idx_to_cam_idxs[j] >= 0
+                i_calib = cams_calib[mat_idx_to_cam_idxs[i]]
+                j_calib = cams_calib[mat_idx_to_cam_idxs[j]]
+                i_pose = poses_3ds_2ds[i]
+                j_pose = poses_3ds_2ds[j]
+                e_error = calc_epipolar_error(i_calib, i_pose.keypoints, i_pose.keypoints_score,
+                                              j_calib, j_pose.keypoints, j_pose.keypoints_score,
+                                              True)
+                dst_mat[i, j] = e_error
+            elif pose_mask[i] == '2d' and pose_mask[j] == '3d':
+                # re-projection error
+                p_2d = poses_3ds_2ds[i]
+                calib = cams_calib[mat_idx_to_cam_idxs[i]]
+                p_3d = poses_3ds_2ds[j]
+                e_error = reprojection_error(p_3d, p_2d, calib, True)
+                dst_mat[i, j] = e_error
 
-                elif pose_mask[i] == '3d' and pose_mask[j] == '2d':
-                    # re-projection error
-                    p_2d = poses_3ds_2ds[j]
-                    calib = cams_calib[mat_idx_to_cam_idxs[j]]
-                    p_3d = poses_3ds_2ds[i]
-                    e_error = reprojection_error(p_3d, p_2d, calib, True)
-                    dst_mat[i, j] = e_error
-                else:
-                    # no match here
-                    pass
-
-        s_mat = - (dst_mat - dst_mat.mean()) / dst_mat.std()
-        # TODO: add flexible factor
-        s_mat = 1 / (1 + np.exp(-5 * s_mat))
-
-        match_mat = match_als(s_mat, dim_groups)
-        dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
-        for cur_matches in dim_groups_matches:
-            tracklet_idx = -1
-            for grp_idx, local_idx, global_idx in cur_matches:
-                if pose_mask[global_idx] == '3d':
-                    tracklet_idx = mat_idx_to_tracklet_ids[global_idx]
-                    break
-            if tracklet_idx >= 0:
-                s_match = SpatialMatch([], [])
-                for grp_idx, local_idx, global_idx in cur_matches:
-                    if pose_mask[global_idx] == '2d':
-                        s_match.view_idxs.append(mat_idx_to_cam_idxs[global_idx])
-                        s_match.pose_ids.append(mat_idx_to_poses_2d_ids[global_idx])
-                out_matches.spatial_time_matches[tracklet_idx] = s_match
-
+            elif pose_mask[i] == '3d' and pose_mask[j] == '2d':
+                # re-projection error
+                p_2d = poses_3ds_2ds[j]
+                calib = cams_calib[mat_idx_to_cam_idxs[j]]
+                p_3d = poses_3ds_2ds[i]
+                e_error = reprojection_error(p_3d, p_2d, calib, True)
+                dst_mat[i, j] = e_error
             else:
-                s_match = SpatialMatch([], [])
-                for grp_idx, local_idx, global_idx in cur_matches:
-                    if pose_mask[global_idx] == '2d':
-                        s_match.view_idxs.append(mat_idx_to_cam_idxs[global_idx])
-                        s_match.pose_ids.append(mat_idx_to_poses_2d_ids[global_idx])
-                    else:
-                        assert False, "expect that there are only 2d poses in this assocations"
-                out_matches.spatial_matches.append(s_match)
+                # no match here
+                pass
 
-    else:
-        points_set = []
-        dim_groups = [0]
-        cnt = 0
-        for poses in cams_poses:
-            cnt += len(poses)
-            dim_groups.append(cnt)
-            for p in poses:
-                points_set.append(p.keypoints)
-        points_set = np.array(points_set)
-        # build matrix
-        s_mat = geometry_affinity(points_set, pairwise_f_mats, dim_groups)
-        match_mat = match_als(s_mat, dim_groups)
-        dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
-        for grp_cam_pose_idxs in dim_groups_matches:
+    s_mat = - (dst_mat - dst_mat.mean()) / dst_mat.std()
+    # TODO: add flexible factor
+    s_mat = 1 / (1 + np.exp(-5 * s_mat))
+
+    match_mat = match_als(s_mat, dim_groups)
+    dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
+    for cur_matches in dim_groups_matches:
+        tracklet_idx = -1
+        for grp_idx, local_idx, global_idx in cur_matches:
+            if pose_mask[global_idx] == '3d':
+                tracklet_idx = mat_idx_to_tracklet_ids[global_idx]
+                break
+        if tracklet_idx >= 0:
             s_match = SpatialMatch([], [])
-            for cam_idx, p_idx, _ in grp_cam_pose_idxs:
-                s_match.view_idxs.append(cam_idx)
-                s_match.pose_ids.append(cam_poses_id[cam_idx][p_idx])
+            for grp_idx, local_idx, global_idx in cur_matches:
+                if pose_mask[global_idx] == '2d':
+                    s_match.view_idxs.append(mat_idx_to_cam_idxs[global_idx])
+                    s_match.pose_ids.append(mat_idx_to_poses_2d_ids[global_idx])
+            out_matches.spatial_time_matches[tracklet_idx] = s_match
+
+        else:
+            s_match = SpatialMatch([], [])
+            for grp_idx, local_idx, global_idx in cur_matches:
+                if pose_mask[global_idx] == '2d':
+                    s_match.view_idxs.append(mat_idx_to_cam_idxs[global_idx])
+                    s_match.pose_ids.append(mat_idx_to_poses_2d_ids[global_idx])
+                else:
+                    assert False, "expect that there are only 2d poses in this assocations"
             out_matches.spatial_matches.append(s_match)
 
     return out_matches
+
+
+def associate_tracking(tlets: List[MvTracklet], frames: List[FrameData]) -> SpatialTimeMatch:
+    if tlets:
+        return match_spatial_time(tlets, frames)
+    else:
+        return match_spatial(frames)
 
 
 class MvTracker:
@@ -593,7 +619,7 @@ class MvTracker:
         # only do association with alive tracks
         alive_tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
 
-        match_results = match_spatial_time(alive_tracklets, d_frames)
+        match_results = associate_tracking(alive_tracklets, d_frames)
 
         # spatial time matches
         for t_idx, tlet in enumerate(alive_tracklets):
@@ -611,7 +637,8 @@ class MvTracker:
         # spatial matches
         for s_match in match_results.spatial_matches:
             if len(s_match) >= 2:
-                pose_2ds = [(v_idx, d_frames[v_idx].poses[p_id]) for v_idx, p_id in zip(s_match.view_idxs, s_match.pose_ids)]
+                pose_2ds = [(v_idx, d_frames[v_idx].poses[p_id]) for v_idx, p_id in
+                            zip(s_match.view_idxs, s_match.pose_ids)]
                 cam_projs = [d_frames[v_idx].calib.P for v_idx in s_match.view_idxs]
                 # p_3d_co = grp.triangulate()
                 # p_3d = Pose(grp.poses[0].pose_type, p_3d_co[:, :3], p_3d_co[:, -1][:, np.newaxis], box=None)
@@ -738,7 +765,12 @@ def test_ik_tlet(tlet: MvTracklet):
         run_test_ik(p_3d.keypoints, [p.to_kps_array() for p in cam_poses], cam_projs)
 
 
+from pose_viz import draw_poses_concat
+
+
 def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
+    global g_cur_frame_images
+
     vpaths = sorted([vpath for vpath in video_dir.glob('*.*')], key=lambda path: path.stem)
     vreaders = [cv2.VideoCapture(str(vpath)) for vpath in vpaths]
     frm_pose_paths = sorted([ppath for ppath in pose_dir.glob('*.pkl')], key=lambda path: int(path.stem))
@@ -755,62 +787,40 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
             bar.update()
             bar.set_description(
                 f'tracking. n_dead = {len(tracker.dead_tracklets)}. n_tracks = {len(tracker.tracklets)}')
+
             oks_frames = [vreader.read() for vreader in vreaders]
             is_oks, org_frames = list(zip(*oks_frames))
             if not all(is_oks) or frm_idx >= len(frm_pose_paths):
                 break
             org_frames = {view_idx: frm for view_idx, frm in enumerate(org_frames)}
 
-            d_frames = load_pickle(frm_pose_paths[frm_idx], 'rb')
+            g_cur_frame_images = org_frames
+
+            d_frames: List[FrameData] = load_pickle(frm_pose_paths[frm_idx], 'rb')
             frm_idx += 1
 
             # if frm_idx < 90:
             #     continue
 
-            # for frm_img, frm_data in zip(org_frames, d_frames):
-            #     draw_poses(frm_img, frm_data)
-            #
-            # for i in range(len(d_frames)):
-            #     cv2.imshow(f'{i}', frm_img)
-            # cv2.waitKeyEx(1)
-
-            # from mv_association import match_multiview_poses
-            # cams_poses_ids = [[p_id for p_id in frm.poses.keys()]
-            #                   for frm in d_frames]
-            # cams_poses = [[d_frames[cam_idx].poses[p_id] for p_id in p_ids]
-            #               for cam_idx, p_ids in enumerate(cams_poses_ids)]
-            # cams_calibs = [frm.calib
-            #                for frm in d_frames]
-            # person_matches = match_multiview_poses(cams_poses, cams_calibs)
-            # pose_grps = []
-            # for grp_cam_pose_idxs in person_matches:
-            #     grp = None
-            #     for cam_idx, p_idx in grp_cam_pose_idxs:
-            #         calib = cams_calibs[cam_idx]
-            #         p_id = cams_poses_ids[cam_idx][p_idx]
-            #         pose = cams_poses[cam_idx][p_idx]
-            #         if grp is None:
-            #             grp = PoseAssociation(cam=calib, frame_idx=frm_idx, view_id=cam_idx, id_obj=(p_id, pose),
-            #                                   use_weighted_kps_score=True,
-            #                                   match_threshold=12,
-            #                                   min_triangulate_kps_score=0.1)
-            #         else:
-            #             grp.cams.append(calib)
-            #             grp.view_ids.append(cam_idx)
-            #             grp.id_poses.append((p_id, pose))
-            #     pose_grps.append(grp)
-            #
-            # debug_img_dir = '/media/F/thesis/data/debug/mv_association'
-            # os.makedirs(debug_img_dir, exist_ok=True)
-            # for p_id, grp in enumerate(pose_grps):
-            #     viz = grp.debug_get_association_viz(org_frames)
-            #     cv2.imwrite(f'{debug_img_dir}/{frm_idx}_{p_id}.jpg', viz)
-            #     # cv2.imshow('test', viz)
-            #     # k = cv2.waitKeyEx(1)
-            #     # while k != ord('n'):
-            #     #     k = cv2.waitKeyEx(1)
-
-            tracker.update_4d(frm_idx, d_frames, debug_view_imgs=org_frames)
+            test_spatial = True
+            if test_spatial:
+                s_matches = match_spatial(d_frames)
+                for match_idx, s_match in enumerate(s_matches.spatial_matches):
+                    poses_2ds = []
+                    imgs = []
+                    for v_idx, p_id in zip(s_match.view_idxs, s_match.pose_ids):
+                        poses_2ds.append(d_frames[v_idx].poses[p_id])
+                        imgs.append(org_frames[v_idx])
+                    match_viz = draw_poses_concat(poses_2ds, imgs, view_idxs=s_match.view_idxs, frm_idx=frm_idx)
+                    debug_img_dir = '/media/F/thesis/data/debug/mv_association'
+                    os.makedirs(debug_img_dir, exist_ok=True)
+                    cv2.imwrite(f'{debug_img_dir}/{frm_idx}_{match_idx}.jpg', match_viz)
+                    # cv2.imshow('test', match_viz)
+                    # k = cv2.waitKeyEx(1)
+                    # while k != ord('n'):
+                    #     k = cv2.waitKeyEx(1)
+            else:
+                tracker.update_4d(frm_idx, d_frames, debug_view_imgs=org_frames)
 
             if frm_idx >= n_test:
                 break

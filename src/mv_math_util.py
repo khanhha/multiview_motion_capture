@@ -138,6 +138,10 @@ def calc_epipolar_error(cam1: Calib, keypoints_1: np.ndarray, scores_1: np.ndarr
         # total_score = max(float(np.sum(kps_cost_factor)), 1e-5)
         # total = total / total_score  # normalize
         total = total / n_joint
+
+        if total > 1000:
+            debug = True
+
     return total
 
 
