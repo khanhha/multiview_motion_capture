@@ -1,8 +1,10 @@
 import numpy as np
 import cv2
 import pickle
+import subprocess
 from typing import Dict, List, Optional
 from pathlib import Path
+import torch
 import json
 import scipy.stats as st
 import os
@@ -26,8 +28,9 @@ from pose_def import (Pose, KpsType, KpsFormat, get_pose_bones_index, conversion
                       map_to_common_keypoints)
 from mv_math_util import (Calib, calc_epipolar_error, triangulate_point_groups_from_multiple_views_linear,
                           project_3d_points_to_image_plane_without_distortion, unproject_uv_to_rays,
-                          points_to_lines_distances)
+                          points_to_lines_distances, calc_pairwise_f_mats, geometry_affinity)
 from pose_viz import plot_poses_3d
+from mv_association import match_als
 from enum import Enum
 from inverse_kinematics import PoseShapeParam, Skeleton, PoseSolver, load_skeleton
 
@@ -268,7 +271,7 @@ def load_calib(cpath: Path):
 
 
 @dataclass
-class TrackletMatch:
+class SpatialMatch:
     # view_idx, p_id
     view_idxs: List[int] = field(default_factory=list)
     pose_ids: List[int] = field(default_factory=list)
@@ -304,19 +307,19 @@ def triangulate_util(cam_poses: List[Pose], cam_projs: List[np.ndarray], min_tri
 class MvTracklet:
     def __init__(self,
                  frm_idx: int,
-                 cam_poses_2d: List[Pose],
+                 cam_poses_2d: List[Tuple[int, Pose]],
                  cam_projs: List[np.ndarray],
                  skel: Skeleton,
                  n_inits: int = 3,
                  max_age: int = 3):
         self.frame_idxs: List[int] = [frm_idx]
-        self.cam_poses_2d: List[List[Pose]] = [cam_poses_2d]
+        self.cam_poses_2d: List[List[Tuple[int, Pose]]] = [cam_poses_2d]
         self.cam_projs: List[List[np.ndarray]] = [cam_projs]
         self.skel = skel
         solver = PoseSolver(skel, init_pose=None,
-                            cam_poses_2d=[p.to_kps_array() for p in cam_poses_2d],
+                            cam_poses_2d=[p[1].to_kps_array() for p in cam_poses_2d],
                             cam_projs=cam_projs,
-                            obs_kps_format=cam_poses_2d[0].pose_type)
+                            obs_kps_format=cam_poses_2d[0][1].pose_type)
         pparam, pose = solver.solve()
         self.poses: List[Tuple[PoseShapeParam, Pose]] = [(pparam, pose)]
 
@@ -338,9 +341,9 @@ class MvTracklet:
     def predict(self):
         self.time_since_update += 1
 
-    def update(self, frm_idx: int, match: TrackletMatch, frames: List[FrameData]):
+    def update(self, frm_idx: int, match: SpatialMatch, frames: List[FrameData]):
         cam_projs = [frames[v_idx].calib.P for v_idx in match.view_idxs]
-        cam_poses = [frames[v_idx].poses[p_id] for v_idx, p_id in zip(match.view_idxs, match.pose_ids)]
+        cam_poses = [(v_idx, frames[v_idx].poses[p_id]) for v_idx, p_id in zip(match.view_idxs, match.pose_ids)]
 
         self.frame_idxs.append(frm_idx)
         self.cam_poses_2d.append(cam_poses)
@@ -348,9 +351,9 @@ class MvTracklet:
 
         solver = PoseSolver(self.skel,
                             init_pose=self.poses[-1][0],
-                            cam_poses_2d=[p.to_kps_array() for p in cam_poses],
+                            cam_poses_2d=[p[1].to_kps_array() for p in cam_poses],
                             cam_projs=cam_projs,
-                            obs_kps_format=cam_poses[0].pose_type)
+                            obs_kps_format=cam_poses[0][1].pose_type)
         pparam, pose = solver.solve()
         self.poses.append((pparam, pose))
 
@@ -374,6 +377,178 @@ class MvTracklet:
 
     def is_dead(self):
         return self.state == TrackState.Dead
+
+
+def reprojection_error(p_3d: Pose, p_2d: Pose, calib: Calib, weighted_score):
+    p_3d_homo = np.concatenate([p_3d.keypoints, np.ones((len(p_3d.keypoints), 1))], axis=1)
+    p_2d_reproj = calib.P @ p_3d_homo.T
+    p_2d_reproj = (p_2d_reproj[:2] / p_2d_reproj[2]).T
+    if weighted_score:
+        score_mask = p_2d.keypoints_score.flatten() * p_3d.keypoints_score.flatten()
+        e = np.linalg.norm(p_2d_reproj - p_2d.keypoints, axis=-1) * score_mask
+    else:
+        e = np.linalg.norm(p_2d_reproj - p_2d.keypoints, axis=-1)
+    return np.mean(e)
+
+
+def parse_match_result(match_mat_: np.ndarray, n, dims_group):
+    match_mat = torch.tensor(match_mat_)
+    bin_match = match_mat[:, torch.nonzero(torch.sum(match_mat, dim=0) > 1.9).squeeze()] > 0.9
+    bin_match = bin_match.reshape(n, -1)
+    matched_list = [[] for i in range(bin_match.shape[1])]
+    for sub_img_id, row in enumerate(bin_match):
+        if row.sum() != 0:
+            pid = row.numpy().argmax()
+            matched_list[pid].append(sub_img_id)
+
+    dim_groups_matches = []
+    for matches in matched_list:
+        cur_matches = []
+        for idx in matches:
+            grp_offset = 0
+            grp_idx = 0
+            for cur_grp_idx, offset in enumerate(dims_group):
+                if offset <= idx:
+                    grp_offset = offset
+                    grp_idx = cur_grp_idx
+                else:
+                    break
+
+            local_idx = idx - grp_offset
+            cur_matches.append((grp_idx, local_idx, idx))
+
+        if cur_matches:
+            dim_groups_matches.append(cur_matches)
+
+    return dim_groups_matches
+
+
+@dataclass
+class SpatialTimeMatch:
+    spatial_time_matches: Dict[int, SpatialMatch]  # Tracklet.track_id to view-poses
+    spatial_matches: List[SpatialMatch]  # view poses with view poses
+
+
+def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> SpatialTimeMatch:
+    cam_poses_id = [[pose for pose in frm.poses.keys()]
+                    for frm in frames]
+    cams_poses = [[frames[cam_idx].poses[p_id] for p_id in pose_ids]
+                  for cam_idx, pose_ids in enumerate(cam_poses_id)]
+    cams_calib = [frm.calib for frm in frames]
+    pairwise_f_mats = calc_pairwise_f_mats(cams_calib)
+
+    out_matches = SpatialTimeMatch({}, [])
+
+    if tlets:
+        poses_3ds_2ds: List[Pose] = [tlet.last_pose_3d for tlet in tlets]
+        pose_mask = ['3d'] * len(tlets)
+        mat_idx_to_cam_idxs = [-1] * len(tlets)
+        mat_idx_to_tracklet_ids = [tlet_idx for tlet_idx in range(len(tlets))]
+        mat_idx_to_poses_2d_ids = [-1] * len(tlets)
+        part_lens = [0, len(tlets)]
+        for cam_idx, poses in enumerate(cams_poses):
+            poses_3ds_2ds.extend(poses)
+            pose_mask.extend(['2d'] * len(poses))
+            part_lens.append(len(poses))
+            mat_idx_to_cam_idxs.extend([cam_idx] * len(poses))
+            mat_idx_to_tracklet_ids.extend([-1] * len(poses))
+            mat_idx_to_poses_2d_ids.extend(cam_poses_id[cam_idx])
+
+        dim_groups = np.cumsum(part_lens).tolist()
+
+        n_poses = len(poses_3ds_2ds)
+        dst_mat = np.zeros((n_poses, n_poses), dtype=np.float)
+        for i in range(n_poses):
+            for j in range(n_poses):
+                # same pose
+                if i == j:
+                    continue
+                # same view
+                if mat_idx_to_cam_idxs[i] >= 0 and mat_idx_to_cam_idxs[i] == mat_idx_to_cam_idxs[j]:
+                    continue
+
+                if pose_mask[i] == '2d' and pose_mask[j] == '2d':
+                    # epipolar error
+                    assert mat_idx_to_cam_idxs[i] >= 0 and mat_idx_to_cam_idxs[j] >= 0
+                    i_calib = cams_calib[mat_idx_to_cam_idxs[i]]
+                    j_calib = cams_calib[mat_idx_to_cam_idxs[j]]
+                    i_pose = poses_3ds_2ds[i]
+                    j_pose = poses_3ds_2ds[j]
+                    e_error = calc_epipolar_error(i_calib, i_pose.keypoints, i_pose.keypoints_score,
+                                                  j_calib, j_pose.keypoints, j_pose.keypoints_score,
+                                                  True)
+                    dst_mat[i, j] = e_error
+                elif pose_mask[i] == '2d' and pose_mask[j] == '3d':
+                    # re-projection error
+                    p_2d = poses_3ds_2ds[i]
+                    calib = cams_calib[mat_idx_to_cam_idxs[i]]
+                    p_3d = poses_3ds_2ds[j]
+                    e_error = reprojection_error(p_3d, p_2d, calib, True)
+                    dst_mat[i, j] = e_error
+
+                elif pose_mask[i] == '3d' and pose_mask[j] == '2d':
+                    # re-projection error
+                    p_2d = poses_3ds_2ds[j]
+                    calib = cams_calib[mat_idx_to_cam_idxs[j]]
+                    p_3d = poses_3ds_2ds[i]
+                    e_error = reprojection_error(p_3d, p_2d, calib, True)
+                    dst_mat[i, j] = e_error
+                else:
+                    # no match here
+                    pass
+
+        s_mat = - (dst_mat - dst_mat.mean()) / dst_mat.std()
+        # TODO: add flexible factor
+        s_mat = 1 / (1 + np.exp(-5 * s_mat))
+
+        match_mat = match_als(s_mat, dim_groups)
+        dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
+        for cur_matches in dim_groups_matches:
+            tracklet_idx = -1
+            for grp_idx, local_idx, global_idx in cur_matches:
+                if pose_mask[global_idx] == '3d':
+                    tracklet_idx = mat_idx_to_tracklet_ids[global_idx]
+                    break
+            if tracklet_idx >= 0:
+                s_match = SpatialMatch([], [])
+                for grp_idx, local_idx, global_idx in cur_matches:
+                    if pose_mask[global_idx] == '2d':
+                        s_match.view_idxs.append(mat_idx_to_cam_idxs[global_idx])
+                        s_match.pose_ids.append(mat_idx_to_poses_2d_ids[global_idx])
+                out_matches.spatial_time_matches[tracklet_idx] = s_match
+
+            else:
+                s_match = SpatialMatch([], [])
+                for grp_idx, local_idx, global_idx in cur_matches:
+                    if pose_mask[global_idx] == '2d':
+                        s_match.view_idxs.append(mat_idx_to_cam_idxs[global_idx])
+                        s_match.pose_ids.append(mat_idx_to_poses_2d_ids[global_idx])
+                    else:
+                        assert False, "expect that there are only 2d poses in this assocations"
+                out_matches.spatial_matches.append(s_match)
+
+    else:
+        points_set = []
+        dim_groups = [0]
+        cnt = 0
+        for poses in cams_poses:
+            cnt += len(poses)
+            dim_groups.append(cnt)
+            for p in poses:
+                points_set.append(p.keypoints)
+        points_set = np.array(points_set)
+        # build matrix
+        s_mat = geometry_affinity(points_set, pairwise_f_mats, dim_groups)
+        match_mat = match_als(s_mat, dim_groups)
+        dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
+        for grp_cam_pose_idxs in dim_groups_matches:
+            s_match = SpatialMatch([], [])
+            for cam_idx, p_idx, _ in grp_cam_pose_idxs:
+                s_match.view_idxs.append(cam_idx)
+                s_match.pose_ids.append(cam_poses_id[cam_idx][p_idx])
+            out_matches.spatial_matches.append(s_match)
+
+    return out_matches
 
 
 class MvTracker:
@@ -411,78 +586,38 @@ class MvTracker:
         else:
             return []
 
-    def update(self, frm_idx: int, d_frames: List[FrameData], debug_view_imgs: Dict[int, np.ndarray]):
-        n_views = len(d_frames)
+    def update_4d(self, frm_idx: int, d_frames: List[FrameData], debug_view_imgs: Dict[int, np.ndarray]):
         for tlet in self.tracklets:
             tlet.predict()
 
         # only do association with alive tracks
         alive_tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
 
-        # matching between each 3d tracklet and 2d poses in different views
-        tlet_matches = [TrackletMatch() for _ in range(len(alive_tracklets))]
-        for vi in range(n_views):
-            matches = self.tracklet_to_poses_association(alive_tracklets, d_frames[vi])
-            for t_idx, p_id in matches:
-                tlet_matches[t_idx].view_idxs.append(vi)
-                tlet_matches[t_idx].pose_ids.append(p_id)
+        match_results = match_spatial_time(alive_tracklets, d_frames)
 
-        # update tracks with associated detections
-        for tlet, tlet_match in zip(alive_tracklets, tlet_matches):
-            if len(tlet_match) >= 2:
-                tlet.update(frm_idx, tlet_match, d_frames)
+        # spatial time matches
+        for t_idx, tlet in enumerate(alive_tracklets):
+            if t_idx in match_results.spatial_time_matches:
+                s_match = match_results.spatial_time_matches[t_idx]
+                if len(s_match) >= 2:
+                    alive_tracklets[t_idx].update(frm_idx, s_match, d_frames)
+                elif len(s_match) == 1:
+                    # TODO: handle a single new pose
+                    # alive_tracklets[t_idx].update(frm_idx, s_match, d_frames)
+                    pass
             else:
                 tlet.mark_missed()
 
-        # now handle un-matched poses
-        view_matched_pids = [[] for _ in range(n_views)]
-        for tlet_match in tlet_matches:
-            for v_idx, p_id in zip(tlet_match.view_idxs, tlet_match.pose_ids):
-                view_matched_pids[v_idx].append(p_id)
-
-        # run multi-view 2d pose matching on undetected poses
-        new_d_frames = [copy.copy(frm) for frm in d_frames]
-        for v_idx, frm in enumerate(new_d_frames):
-            for p_id in view_matched_pids[v_idx]:
-                del frm.poses[p_id]
-
-        # test mv matching
-        # from mv_association import match_multiview_poses
-        # cams_poses_ids = [[p_id for p_id in frm.poses.keys()]
-        #                   for frm in new_d_frames]
-        # cams_poses = [[new_d_frames[cam_idx].poses[p_id] for p_id in p_ids]
-        #               for cam_idx, p_ids in enumerate(cams_poses_ids)]
-        # cams_calibs = [frm.calib
-        #                for frm in new_d_frames]
-        # person_matches = match_multiview_poses(cams_poses, cams_calibs)
-        # pose_grps = []
-        # for grp_cam_pose_idxs in person_matches:
-        #     grp = None
-        #     for cam_idx, p_idx in grp_cam_pose_idxs:
-        #         calib = cams_calibs[cam_idx]
-        #         p_id = cams_poses_ids[cam_idx][p_idx]
-        #         pose = cams_poses[cam_idx][p_idx]
-        #         if grp is None:
-        #             grp = PoseAssociation(cam=calib, frame_idx=frm_idx, view_id=cam_idx, id_obj=(p_id, pose),
-        #                                   use_weighted_kps_score=True,
-        #                                   match_threshold=12,
-        #                                   min_triangulate_kps_score=0.1)
-        #         else:
-        #             grp.cams.append(calib)
-        #             grp.view_ids.append(cam_idx)
-        #             grp.id_poses.append((p_id, pose))
-        #     pose_grps.append(grp)
-
-        # debug
-        pose_grps = match_objects_across_views(frame_idx=frm_idx, view_frames=new_d_frames,
-                                               use_kps_weighted_score=True, match_threshold=12,
-                                               min_triangulate_kps_score=0.1)
-        for grp in pose_grps:
-            if len(grp) >= 2:
+        # spatial matches
+        for s_match in match_results.spatial_matches:
+            if len(s_match) >= 2:
+                pose_2ds = [(v_idx, d_frames[v_idx].poses[p_id]) for v_idx, p_id in zip(s_match.view_idxs, s_match.pose_ids)]
+                cam_projs = [d_frames[v_idx].calib.P for v_idx in s_match.view_idxs]
                 # p_3d_co = grp.triangulate()
                 # p_3d = Pose(grp.poses[0].pose_type, p_3d_co[:, :3], p_3d_co[:, -1][:, np.newaxis], box=None)
-                tlet = MvTracklet(frm_idx, cam_poses_2d=grp.poses, cam_projs=grp.cam_projs, skel=self.skeleton)
+                tlet = MvTracklet(frm_idx, cam_poses_2d=pose_2ds, cam_projs=cam_projs, skel=self.skeleton)
                 self.tracklets.append(tlet)
+
                 #
                 # viz = grp.debug_get_association_viz(debug_view_imgs)
                 # cv2.imshow('test', viz)
@@ -494,6 +629,56 @@ class MvTracker:
         dead_tlets = [tlet for tlet in self.tracklets if tlet.is_dead()]
         self.dead_tracklets.extend(dead_tlets)
         self.tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
+
+    # def update(self, frm_idx: int, d_frames: List[FrameData], debug_view_imgs: Dict[int, np.ndarray]):
+    #     n_views = len(d_frames)
+    #     for tlet in self.tracklets:
+    #         tlet.predict()
+    #
+    #     # only do association with alive tracks
+    #     alive_tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
+    #
+    #     # matching between each 3d tracklet and 2d poses in different views
+    #     tlet_matches = [SpatialMatch() for _ in range(len(alive_tracklets))]
+    #     for vi in range(n_views):
+    #         matches = self.tracklet_to_poses_association(alive_tracklets, d_frames[vi])
+    #         for t_idx, p_id in matches:
+    #             tlet_matches[t_idx].view_idxs.append(vi)
+    #             tlet_matches[t_idx].pose_ids.append(p_id)
+    #
+    #     # update tracks with associated detections
+    #     for tlet, tlet_match in zip(alive_tracklets, tlet_matches):
+    #         if len(tlet_match) >= 2:
+    #             tlet.update(frm_idx, tlet_match, d_frames)
+    #         else:
+    #             tlet.mark_missed()
+    #
+    #     # now handle un-matched poses
+    #     view_matched_pids = [[] for _ in range(n_views)]
+    #     for tlet_match in tlet_matches:
+    #         for v_idx, p_id in zip(tlet_match.view_idxs, tlet_match.pose_ids):
+    #             view_matched_pids[v_idx].append(p_id)
+    #
+    #     # run multi-view 2d pose matching on undetected poses
+    #     new_d_frames = [copy.copy(frm) for frm in d_frames]
+    #     for v_idx, frm in enumerate(new_d_frames):
+    #         for p_id in view_matched_pids[v_idx]:
+    #             del frm.poses[p_id]
+    #
+    #     pose_grps = match_objects_across_views(frame_idx=frm_idx, view_frames=new_d_frames,
+    #                                            use_kps_weighted_score=True, match_threshold=12,
+    #                                            min_triangulate_kps_score=0.1)
+    #     for grp in pose_grps:
+    #         if len(grp) >= 2:
+    #             # p_3d_co = grp.triangulate()
+    #             # p_3d = Pose(grp.poses[0].pose_type, p_3d_co[:, :3], p_3d_co[:, -1][:, np.newaxis], box=None)
+    #             tlet = MvTracklet(frm_idx, cam_poses_2d=grp.poses, cam_projs=grp.cam_projs, skel=self.skeleton)
+    #             self.tracklets.append(tlet)
+    #             #
+    #     # filter out dead tracks
+    #     dead_tlets = [tlet for tlet in self.tracklets if tlet.is_dead()]
+    #     self.dead_tracklets.extend(dead_tlets)
+    #     self.tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
 
 
 def draw_poses(frm_img: np.ndarray, frm_data: FrameData):
@@ -563,7 +748,7 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     skeleton = load_skeleton()
     tracker = MvTracker(skeleton)
     frm_idx = 0
-    n_test = 1000
+    n_test = 300
     n_test = min(len(frm_pose_paths), n_test)
     with tqdm(total=len(frm_pose_paths), desc='tracking') as bar:
         while True:
@@ -589,43 +774,43 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
             #     cv2.imshow(f'{i}', frm_img)
             # cv2.waitKeyEx(1)
 
-            from mv_association import match_multiview_poses
-            cams_poses_ids = [[p_id for p_id in frm.poses.keys()]
-                              for frm in d_frames]
-            cams_poses = [[d_frames[cam_idx].poses[p_id] for p_id in p_ids]
-                          for cam_idx, p_ids in enumerate(cams_poses_ids)]
-            cams_calibs = [frm.calib
-                           for frm in d_frames]
-            person_matches = match_multiview_poses(cams_poses, cams_calibs)
-            pose_grps = []
-            for grp_cam_pose_idxs in person_matches:
-                grp = None
-                for cam_idx, p_idx in grp_cam_pose_idxs:
-                    calib = cams_calibs[cam_idx]
-                    p_id = cams_poses_ids[cam_idx][p_idx]
-                    pose = cams_poses[cam_idx][p_idx]
-                    if grp is None:
-                        grp = PoseAssociation(cam=calib, frame_idx=frm_idx, view_id=cam_idx, id_obj=(p_id, pose),
-                                              use_weighted_kps_score=True,
-                                              match_threshold=12,
-                                              min_triangulate_kps_score=0.1)
-                    else:
-                        grp.cams.append(calib)
-                        grp.view_ids.append(cam_idx)
-                        grp.id_poses.append((p_id, pose))
-                pose_grps.append(grp)
+            # from mv_association import match_multiview_poses
+            # cams_poses_ids = [[p_id for p_id in frm.poses.keys()]
+            #                   for frm in d_frames]
+            # cams_poses = [[d_frames[cam_idx].poses[p_id] for p_id in p_ids]
+            #               for cam_idx, p_ids in enumerate(cams_poses_ids)]
+            # cams_calibs = [frm.calib
+            #                for frm in d_frames]
+            # person_matches = match_multiview_poses(cams_poses, cams_calibs)
+            # pose_grps = []
+            # for grp_cam_pose_idxs in person_matches:
+            #     grp = None
+            #     for cam_idx, p_idx in grp_cam_pose_idxs:
+            #         calib = cams_calibs[cam_idx]
+            #         p_id = cams_poses_ids[cam_idx][p_idx]
+            #         pose = cams_poses[cam_idx][p_idx]
+            #         if grp is None:
+            #             grp = PoseAssociation(cam=calib, frame_idx=frm_idx, view_id=cam_idx, id_obj=(p_id, pose),
+            #                                   use_weighted_kps_score=True,
+            #                                   match_threshold=12,
+            #                                   min_triangulate_kps_score=0.1)
+            #         else:
+            #             grp.cams.append(calib)
+            #             grp.view_ids.append(cam_idx)
+            #             grp.id_poses.append((p_id, pose))
+            #     pose_grps.append(grp)
+            #
+            # debug_img_dir = '/media/F/thesis/data/debug/mv_association'
+            # os.makedirs(debug_img_dir, exist_ok=True)
+            # for p_id, grp in enumerate(pose_grps):
+            #     viz = grp.debug_get_association_viz(org_frames)
+            #     cv2.imwrite(f'{debug_img_dir}/{frm_idx}_{p_id}.jpg', viz)
+            #     # cv2.imshow('test', viz)
+            #     # k = cv2.waitKeyEx(1)
+            #     # while k != ord('n'):
+            #     #     k = cv2.waitKeyEx(1)
 
-            debug_img_dir = '/media/F/thesis/data/debug/mv_association'
-            os.makedirs(debug_img_dir, exist_ok=True)
-            for p_id, grp in enumerate(pose_grps):
-                viz = grp.debug_get_association_viz(org_frames)
-                cv2.imwrite(f'{debug_img_dir}/{frm_idx}_{p_id}.jpg', viz)
-                # cv2.imshow('test', viz)
-                # k = cv2.waitKeyEx(1)
-                # while k != ord('n'):
-                #     k = cv2.waitKeyEx(1)
-
-            # tracker.update(frm_idx, d_frames, debug_view_imgs=org_frames)
+            tracker.update_4d(frm_idx, d_frames, debug_view_imgs=org_frames)
 
             if frm_idx >= n_test:
                 break
@@ -635,20 +820,83 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     all_tlets = tracker.tracklets + tracker.dead_tracklets
     all_tlets = sorted(all_tlets, key=lambda tlet: -len(tlet))
 
-    with open(f'{out_dir}/traclets_shelf.pkl', 'wb') as file:
+    # for tlet in all_tlets:
+    #     poses_3d = [p[-1] for p in tlet.poses]
+    #     plot_poses_3d(poses_3d)
+
+    os.makedirs(out_dir, exist_ok=True)
+    with open(f'{out_dir}/tracklets.pkl', 'wb') as file:
         pickle.dump(file=file, obj={"tracklets": all_tlets})
 
-    for tlet in all_tlets:
-        poses_3d = [p[-1] for p in tlet.poses]
-        plot_poses_3d(poses_3d)
+
+def video_to_images(vpath: Path, img_dir: Path, img_ext: str):
+    out = subprocess.run(['ffmpeg',
+                          '-y',
+                          '-i', str(vpath),
+                          '-hide_banner',
+                          f'{img_dir}/%012d.{img_ext}'])
+    print(f"video_to_images: {out}")
+    return [ipath for ipath in img_dir.glob(f'*.{img_ext}')]
 
 
-def viz_tracklets(in_tracklet_path):
+def draw_tracklet(tlet: MvTracklet, mv_img_paths: List[Dict[int, Path]], out_dir: Path):
+    h = 256
+    for f_idx, frm_poses in zip(tlet.frame_idxs, tlet.cam_poses_2d):
+        all_crops = []
+        for view_idx, pose in frm_poses:
+            valid_kps = pose.keypoints[pose.keypoints_score.flatten() > 0.1, :]
+            bmin, bmax = np.min(valid_kps, axis=0), np.max(valid_kps, axis=0)
+            x1, y1, x2, y2 = np.concatenate([bmin, bmax]).astype(np.int)
+
+            if f_idx not in mv_img_paths[view_idx]:
+                print(f'view {view_idx} missing frames {f_idx}')
+                continue
+            img_path = mv_img_paths[view_idx][f_idx]
+            img = cv2.imread(str(img_path))
+            if y2 > y1 + 5 and x2 > x1 + 5:
+                crop = img[y1:y2, x1:x2]
+                c_h, c_w = crop.shape[:2]
+                new_h = h
+                new_w = int((c_w / c_h) * new_h)
+                crop = cv2.resize(crop, dsize=(new_w, new_h))
+                cv2.putText(crop, f'{view_idx}', (int(0.5 * new_w), 128),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), thickness=2)
+                all_crops.append(crop)
+
+        # view_id increasing from left to right
+        if all_crops:
+            # sorted_view_ids = np.argsort(self.view_ids)
+            # all_crops = [all_crops[idx] for idx in sorted_view_ids]
+
+            viz = np.concatenate(all_crops, axis=1)
+            cv2.putText(viz, f'{f_idx}', (25, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), thickness=2)
+            cv2.imwrite(f'{out_dir}/{f_idx}.jpg', viz)
+
+
+def viz_tracklets(in_tracklet_path, video_dir: Path, out_dir: Path):
+    import tempfile
+
     with open(in_tracklet_path, 'rb') as file:
-        all_tlets = pickle.load(file)
-        for tlet in all_tlets:
-            poses_3d = [p[-1] for p in tlet.poses]
-            plot_poses_3d(poses_3d)
+        all_tlets: List[MvTracklet] = pickle.load(file)["tracklets"]
+
+    with tempfile.TemporaryDirectory() as view_img_dir:
+        view_img_dir = Path(view_img_dir)
+        vpaths = sorted([vdir for vdir in video_dir.glob('*.*')], key=lambda x_: int(x_.stem))
+        view_imgs_paths = []
+        for v_idx, vpath in enumerate(vpaths):
+            img_dir = view_img_dir / vpath.stem
+            os.makedirs(img_dir, exist_ok=True)
+            video_to_images(vpath, img_dir, 'jpg')
+            img_paths = {int(ipath.stem): ipath for ipath in img_dir.glob('*.jpg')}
+            view_imgs_paths.append(img_paths)
+
+        for t_idx, tlet in enumerate(all_tlets):
+            out_tlet_viz = out_dir / f'tlet_{t_idx}'
+            os.makedirs(out_tlet_viz, exist_ok=True)
+            draw_tracklet(tlet, view_imgs_paths, out_dir=out_tlet_viz)
+            # poses_3d = [p[-1] for p in tlet.poses]
+            # plot_poses_3d(poses_3d)
 
 
 def parse_args():
@@ -683,4 +931,6 @@ if __name__ == "__main__":
                                          calib_dir=Path(args.calib_dir),
                                          out_data_dir=Path(args.out_data_dir))
     elif args.mode == 'viz':
-        viz_tracklets(args.tlet_path)
+        out_tlet_viz_dir = '/media/F/datasets/shelf/debug/tracklets_viz'
+        os.makedirs(out_tlet_viz_dir, exist_ok=True)
+        viz_tracklets(args.tlet_path, Path(args.video_dir), Path(out_tlet_viz_dir))

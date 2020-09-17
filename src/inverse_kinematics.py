@@ -265,30 +265,37 @@ class PoseSolver:
     def solve(self) -> Tuple[PoseShapeParam, Pose]:
         obs_pose_3d = triangulate_point_groups_from_multiple_views_linear(self.cam_projs,
                                                                           self.cam_poses_2d, 0.01, True)
+        # debug
+        return (PoseShapeParam(root=np.zeros((3,)),
+                               euler_angles=np.zeros((17, 3)), bone_lens=np.zeros((17, 3))),
+                Pose(keypoints=obs_pose_3d[:, :3],
+                     keypoints_score=obs_pose_3d[:, -1],
+                     box=None,
+                     pose_type=KpsFormat.COCO))
 
-        if self.init_pose is None:
-            init_root = 0.5 * (obs_pose_3d[self.obs_kps_idx_map[KpsType.L_Hip], :3] +
-                               obs_pose_3d[self.obs_kps_idx_map[KpsType.R_Hip], :3])
-            init_blens = self.skel.ref_bone_lens.copy()
-            init_angles = np.zeros((self.n_joints, 3), dtype=init_root.dtype)
-            init_param = PoseShapeParam(init_root, init_angles, init_blens)
-        else:
-            init_param = self.init_pose
-
-        param_1 = solve_pose(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, init_param)
-        param_2 = solve_pose_bone_lens(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, param_1)
-
-        pred_locs_1, _ = foward_kinematics(self.skel, param_1)
-        pred_locs_2, _ = foward_kinematics(self.skel, param_2)
-        # plot_ik_result(pred_locs_1, pred_locs_2,
-        #                target_pose=obs_pose_3d,
-        #                bone_idxs=self.skel.bone_idxs,
-        #                target_bone_idxs=None)
-
-        return param_2, Pose(keypoints=pred_locs_2,
-                             keypoints_score=np.zeros((len(pred_locs_2), 1)),
-                             box=None,
-                             pose_type=KpsFormat.BASIC_18)
+        # if self.init_pose is None:
+        #     init_root = 0.5 * (obs_pose_3d[self.obs_kps_idx_map[KpsType.L_Hip], :3] +
+        #                        obs_pose_3d[self.obs_kps_idx_map[KpsType.R_Hip], :3])
+        #     init_blens = self.skel.ref_bone_lens.copy()
+        #     init_angles = np.zeros((self.n_joints, 3), dtype=init_root.dtype)
+        #     init_param = PoseShapeParam(init_root, init_angles, init_blens)
+        # else:
+        #     init_param = self.init_pose
+        #
+        # param_1 = solve_pose(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, init_param)
+        # param_2 = solve_pose_bone_lens(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, param_1)
+        #
+        # pred_locs_1, _ = foward_kinematics(self.skel, param_1)
+        # pred_locs_2, _ = foward_kinematics(self.skel, param_2)
+        # # plot_ik_result(pred_locs_1, pred_locs_2,
+        # #                target_pose=obs_pose_3d,
+        # #                bone_idxs=self.skel.bone_idxs,
+        # #                target_bone_idxs=None)
+        #
+        # return param_2, Pose(keypoints=pred_locs_2,
+        #                      keypoints_score=np.zeros((len(pred_locs_2), 1)),
+        #                      box=None,
+        #                      pose_type=KpsFormat.BASIC_18)
 
 
 def run_test_ik(target_pose_3d: np.ndarray, cam_poses_2d: List[np.ndarray], cam_projs: List[np.ndarray]):

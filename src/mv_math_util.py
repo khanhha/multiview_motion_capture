@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.optimize import least_squares
+import torch
 
 
 @dataclass
@@ -226,10 +227,12 @@ def triangulate_point_groups_from_multiple_views_linear(proj_matricies: List[np.
                 _diff_reprojs.append(_d)
             _diff_reprojs = np.array(_diff_reprojs).flatten()
             return _diff_reprojs
-
-        params = kps_3ds[:, :3].flatten().copy()
-        res = least_squares(_residual_func, params, max_nfev=n_max_iter)
-        kps_3ds[:, :3] = res.x.reshape((-1, 3))
+        try:
+            params = kps_3ds[:, :3].flatten().copy()
+            res = least_squares(_residual_func, params, max_nfev=n_max_iter)
+            kps_3ds[:, :3] = res.x.reshape((-1, 3))
+        except Exception as exp:
+            print(exp)
 
     return kps_3ds
 
@@ -284,3 +287,90 @@ def project_3d_points_to_image_plane_without_distortion(proj_matrix, points_3d, 
         return result
     else:
         raise TypeError("Works only with numpy arrays and PyTorch tensors.")
+
+
+def calc_pairwise_f_mats(calibs: List[Calib]):
+    skew_op = lambda x: torch.tensor([[0, -x[2], x[1]], [x[2], 0, -x[0]], [-x[1], x[0], 0]])
+
+    fundamental_op = lambda K_0, R_0, T_0, K_1, R_1, T_1: torch.inverse(K_0).t() @ (
+            R_0 @ R_1.t()) @ K_1.t() @ skew_op(K_1 @ R_1 @ R_0.t() @ (T_0 - R_0 @ R_1.t() @ T_1))
+
+    fundamental_RT_op = lambda K_0, RT_0, K_1, RT_1: fundamental_op(K_0, RT_0[:, :3], RT_0[:, 3], K_1,
+                                                                    RT_1[:, :3], RT_1[:, 3])
+    F = torch.zeros(len(calibs), len(calibs), 3, 3)  # NxNx3x3 matrix
+    # TODO: optimize this stupid nested for loop
+    for i in range(len(calibs)):
+        for j in range(len(calibs)):
+            F[i, j] += fundamental_RT_op(torch.tensor(calibs[i].K),
+                                         torch.tensor(calibs[i].Rt),
+                                         torch.tensor(calibs[j].K), torch.tensor(calibs[j].Rt))
+            if F[i, j].sum() == 0:
+                F[i, j] += 1e-12  # to avoid nan
+
+    return F.numpy()
+
+
+def projected_distance(pts_0, pts_1, F):
+    """
+    Compute point distance with epipolar geometry knowledge
+    :param pts_0: numpy points array with shape Nx17x2
+    :param pts_1: numpy points array with shape Nx17x2
+    :param F: Fundamental matrix F_{01}
+    :return: numpy array of pairwise distance
+    """
+    # lines = cv2.computeCorrespondEpilines ( pts_0.reshape ( -1, 1, 2 ), 2,
+    #                                         F )  # I know 2 is not seems right, but it actually work for this dataset
+    # lines = lines.reshape ( -1, 3 )
+    # points_1 = np.ones ( (lines.shape[0], 3) )
+    # points_1[:, :2] = pts_1.reshape((-1, 2))
+    #
+    # # to begin here!
+    # dist = np.sum ( lines * points_1, axis=1 ) / np.linalg.norm ( lines[:, :2], axis=1 )
+    # dist = np.abs ( dist )
+    # dist = np.mean ( dist )
+
+    lines = cv2.computeCorrespondEpilines(pts_0.reshape(-1, 1, 2), 2, F)
+    lines = lines.reshape(-1, 17, 1, 3)
+    lines = lines.transpose(0, 2, 1, 3)
+    points_1 = np.ones([1, pts_1.shape[0], 17, 3])
+    points_1[0, :, :, :2] = pts_1
+
+    dist = np.sum(lines * points_1, axis=3)  # / np.linalg.norm(lines[:, :, :, :2], axis=3)
+    dist = np.abs(dist)
+    dist = np.mean(dist, axis=2)
+
+    return dist
+
+
+def geometry_affinity(points_set, Fs, dimGroup):
+    M, _, _ = points_set.shape
+    # distance_matrix = np.zeros ( (M, M), dtype=np.float32 )
+    distance_matrix = np.ones((M, M), dtype=np.float32) * 50
+    np.fill_diagonal(distance_matrix, 0)
+    # TODO: remove this stupid nested for loop
+    import time
+    start_time = time.time()
+    n_groups = len(dimGroup)
+    for cam_id0, h in enumerate(range(n_groups - 1)):
+        for cam_add, k in enumerate(range(cam_id0 + 1, n_groups - 1)):
+            cam_id1 = cam_id0 + cam_add + 1
+            # if there is no one in some view, skip it!
+            if dimGroup[h] == dimGroup[h + 1] or dimGroup[k] == dimGroup[k + 1]:
+                continue
+
+            pose_id0 = points_set[dimGroup[h]:dimGroup[h + 1]]
+            pose_id1 = points_set[dimGroup[k]:dimGroup[k + 1]]
+            mean_dst = 0.5 * (projected_distance(pose_id0, pose_id1, Fs[cam_id0, cam_id1]) +
+                              projected_distance(pose_id1, pose_id0, Fs[cam_id1, cam_id0]).T)
+            distance_matrix[dimGroup[h]:dimGroup[h + 1], dimGroup[k]:dimGroup[k + 1]] = mean_dst
+            # symmetric matrix
+            distance_matrix[dimGroup[k]:dimGroup[k + 1], dimGroup[h]:dimGroup[h + 1]] = \
+                distance_matrix[dimGroup[h]:dimGroup[h + 1], dimGroup[k]:dimGroup[k + 1]].T
+
+    end_time = time.time()
+    # print('using %fs' % (end_time - start_time))
+
+    affinity_matrix = - (distance_matrix - distance_matrix.mean()) / distance_matrix.std()
+    # TODO: add flexible factor
+    affinity_matrix = 1 / (1 + np.exp(-5 * affinity_matrix))
+    return affinity_matrix
