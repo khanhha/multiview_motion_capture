@@ -121,8 +121,7 @@ def calc_epipolar_error(cam1: Calib, keypoints_1: np.ndarray, scores_1: np.ndarr
     # kps_cost_factor[invalid_mask] = 0.0
 
     if np.all(invalid_mask):
-        INFTY_COST = 1e+5
-        total = INFTY_COST
+        return np.nan
     else:
         total = 0
         for i in range(n_joint):
@@ -139,10 +138,7 @@ def calc_epipolar_error(cam1: Calib, keypoints_1: np.ndarray, scores_1: np.ndarr
         # total = total / total_score  # normalize
         total = total / n_joint
 
-        if total > 1000:
-            debug = True
-
-    return total
+        return total
 
 
 def euclidean_to_homogeneous(points):

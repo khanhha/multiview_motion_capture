@@ -33,6 +33,7 @@ from pose_viz import plot_poses_3d
 from mv_association import match_als
 from enum import Enum
 from inverse_kinematics import PoseShapeParam, Skeleton, PoseSolver, load_skeleton
+from pose_viz import draw_poses_concat
 
 matplotlib.use('Qt5Agg')
 
@@ -435,7 +436,36 @@ class SpatialTimeMatch:
     spatial_matches: List[SpatialMatch]  # view poses with view poses
 
 
-g_cur_frame_images: Dict[int, np.ndarray] = {}
+g_prev_frame_images: List[np.ndarray] = []
+g_cur_frame_images: List[np.ndarray] = []
+
+
+def debug_draw_spatial_time_matches(frame_idx,
+                                    st_matches: SpatialTimeMatch,
+                                    tracklets: List[MvTracklet],
+                                    d_frames: List[FrameData]):
+    st_vizs = []
+    for tlet_idx, s_match in st_matches.spatial_time_matches.items():
+        tlet = tracklets[tlet_idx]
+        tlet_poses = [x[1] for x in tlet.cam_poses_2d[-1]]
+        tlet_cam_idxs = [x[0] for x in tlet.cam_poses_2d[-1]]
+        tlet_cam_imgs = [g_prev_frame_images[c_idx] for c_idx in tlet_cam_idxs]
+
+        poses = [d_frames[c_idx].poses[p_id] for c_idx, p_id in zip(s_match.view_idxs, s_match.pose_ids)]
+        cam_idxs = s_match.view_idxs
+        cam_imgs = [g_cur_frame_images[c_idx] for c_idx in cam_idxs]
+
+        crop_height = 256
+        # frame_idx -1 because tracklet belongs to the past
+        viz_0 = draw_poses_concat(tlet_poses, tlet_cam_imgs, tlet_cam_idxs, frame_idx - 1, crop_height)
+        viz_1 = draw_poses_concat(poses, cam_imgs, cam_idxs, frame_idx, crop_height)
+        if viz_0 is not None and viz_1 is not None:
+            max_width = max(viz_0.shape[1], viz_1.shape[1])
+            viz = np.zeros((crop_height * 2, max_width, 3), dtype=viz_0.dtype)
+            viz[:crop_height, :viz_0.shape[1], :] = viz_0
+            viz[crop_height:, :viz_1.shape[1], :] = viz_1
+            st_vizs.append(viz)
+    return st_vizs
 
 
 def match_spatial(frames: List[FrameData]) -> SpatialTimeMatch:
@@ -457,7 +487,7 @@ def match_spatial(frames: List[FrameData]) -> SpatialTimeMatch:
     points_set = np.array(points_set)
     # build matrix
     s_mat = geometry_affinity(points_set, pairwise_f_mats, dim_groups)
-    match_mat = match_als(s_mat, dim_groups)
+    match_mat, _ = match_als(s_mat, dim_groups)
     dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
 
     out_matches = SpatialTimeMatch({}, [])
@@ -514,9 +544,14 @@ def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> Spat
                 j_calib = cams_calib[mat_idx_to_cam_idxs[j]]
                 i_pose = poses_3ds_2ds[i]
                 j_pose = poses_3ds_2ds[j]
+
+                if (i == 7 and j == 10) or (j == 10 and i == 7):
+                    debug = True
+
                 e_error = calc_epipolar_error(i_calib, i_pose.keypoints, i_pose.keypoints_score,
                                               j_calib, j_pose.keypoints, j_pose.keypoints_score,
                                               True)
+
                 dst_mat[i, j] = e_error
             elif pose_mask[i] == '2d' and pose_mask[j] == '3d':
                 # re-projection error
@@ -537,11 +572,12 @@ def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> Spat
                 # no match here
                 pass
 
+    dst_mat[np.isnan(dst_mat)] = np.nanmax(dst_mat)
     s_mat = - (dst_mat - dst_mat.mean()) / dst_mat.std()
     # TODO: add flexible factor
     s_mat = 1 / (1 + np.exp(-5 * s_mat))
 
-    match_mat = match_als(s_mat, dim_groups)
+    match_mat, x_bin = match_als(s_mat, dim_groups)
     dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
     for cur_matches in dim_groups_matches:
         tracklet_idx = -1
@@ -612,14 +648,26 @@ class MvTracker:
         else:
             return []
 
-    def update_4d(self, frm_idx: int, d_frames: List[FrameData], debug_view_imgs: Dict[int, np.ndarray]):
+    def update_4d(self, frm_idx: int, d_frames: List[FrameData], debug_view_imgs: List[np.ndarray]):
         for tlet in self.tracklets:
             tlet.predict()
 
         # only do association with alive tracks
         alive_tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
 
+        if frm_idx == 61:
+            debug = True
+        else:
+            debug = False
+
         match_results = associate_tracking(alive_tracklets, d_frames)
+
+        debug = True
+        if debug:
+            matches_vizs = debug_draw_spatial_time_matches(frm_idx, match_results, alive_tracklets, d_frames)
+            debug_dir = '/media/F/thesis/data/debug/st_match'
+            for idx, viz in enumerate(matches_vizs):
+                cv2.imwrite(f'{debug_dir}/{frm_idx}_{idx}.jpg', viz)
 
         # spatial time matches
         for t_idx, tlet in enumerate(alive_tracklets):
@@ -644,13 +692,6 @@ class MvTracker:
                 # p_3d = Pose(grp.poses[0].pose_type, p_3d_co[:, :3], p_3d_co[:, -1][:, np.newaxis], box=None)
                 tlet = MvTracklet(frm_idx, cam_poses_2d=pose_2ds, cam_projs=cam_projs, skel=self.skeleton)
                 self.tracklets.append(tlet)
-
-                #
-                # viz = grp.debug_get_association_viz(debug_view_imgs)
-                # cv2.imshow('test', viz)
-                # k = cv2.waitKeyEx(1)
-                # while k != ord('n'):
-                #     k = cv2.waitKeyEx(1)
 
         # filter out dead tracks
         dead_tlets = [tlet for tlet in self.tracklets if tlet.is_dead()]
@@ -765,11 +806,9 @@ def test_ik_tlet(tlet: MvTracklet):
         run_test_ik(p_3d.keypoints, [p.to_kps_array() for p in cam_poses], cam_projs)
 
 
-from pose_viz import draw_poses_concat
-
-
 def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     global g_cur_frame_images
+    global g_prev_frame_images
 
     vpaths = sorted([vpath for vpath in video_dir.glob('*.*')], key=lambda path: path.stem)
     vreaders = [cv2.VideoCapture(str(vpath)) for vpath in vpaths]
@@ -792,7 +831,6 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
             is_oks, org_frames = list(zip(*oks_frames))
             if not all(is_oks) or frm_idx >= len(frm_pose_paths):
                 break
-            org_frames = {view_idx: frm for view_idx, frm in enumerate(org_frames)}
 
             g_cur_frame_images = org_frames
 
@@ -802,7 +840,7 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
             # if frm_idx < 90:
             #     continue
 
-            test_spatial = True
+            test_spatial = False
             if test_spatial:
                 s_matches = match_spatial(d_frames)
                 for match_idx, s_match in enumerate(s_matches.spatial_matches):
@@ -821,6 +859,8 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
                     #     k = cv2.waitKeyEx(1)
             else:
                 tracker.update_4d(frm_idx, d_frames, debug_view_imgs=org_frames)
+
+            g_prev_frame_images = g_cur_frame_images
 
             if frm_idx >= n_test:
                 break

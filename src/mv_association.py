@@ -212,7 +212,7 @@ def match_als(W: np.ndarray, dimGroup, **kwargs):
 
     match_mat = transform_closure(torch.tensor(X_bin))
 
-    return match_mat
+    return match_mat, X_bin
 
 
 def matchSVT(S, dimGroup, **kwargs):
