@@ -105,38 +105,26 @@ def calc_epipolar_error(cam1: Calib, keypoints_1: np.ndarray, scores_1: np.ndarr
     epilines_2to1 = epilines_2to1.reshape((-1, 3))
 
     invalid_mask = np.isclose(scores_1 * scores_2, 0.0).flatten()
-    if not score_weighted:
-        # bad or good, valid or invalid has the same weight on the total cost
-        kps_cost_factor = np.ones(len(scores_1))
-    else:
-        # TODO: what happens if two mismatches have perfect confidence score?
-        #  In this case, their kps_cost_factor will be 0 and they still have low error
-        # higher average confidence score means this pair will lower the Epipolar distance [the cost].
-        # lower average confidence score means this pair will increase the Epipolar distance [the cost]
-        kps_cost_factor = 1.0 - 0.5 * (scores_1 + scores_2)
-        # for avoiding the effect of invalid key-points whose confidences are zero
-        kps_cost_factor[invalid_mask] = 0.0
-
-    # kps_cost_factor = np.ones(len(scores_1))
-    # kps_cost_factor[invalid_mask] = 0.0
 
     if np.all(invalid_mask):
         return np.nan
     else:
         total = 0
+        cnt = 0
         for i in range(n_joint):
+            if invalid_mask[i]:
+                continue
             p1 = keypoints_1[i, :]
             p2 = keypoints_2[i, :]
             l1to2 = epilines_1to2[i, :]
             l2to1 = epilines_2to1[i, :]
             d1 = line_to_point_distance(*l1to2, *p2)
             d2 = line_to_point_distance(*l2to1, *p1)
-            # total = total + (d1 + d2) * kps_cost_factor[i]
             total = total + 0.5 * (d1 + d2)
-
+            cnt += 1
         # total_score = max(float(np.sum(kps_cost_factor)), 1e-5)
         # total = total / total_score  # normalize
-        total = total / n_joint
+        total = total / cnt
 
         return total
 
@@ -221,7 +209,7 @@ def triangulate_point_groups_from_multiple_views_linear(proj_matricies: List[np.
             _diff_reprojs = []
             for _vi in range(n_cams):
                 _proj = proj_matricies[_vi] @ _joint_homos
-                _proj = (_proj[:2] / _proj[2]).T
+                _proj = (_proj[:2] / (_proj[2] + 1e-6)).T
                 _d = np.linalg.norm(_proj - points_grps[_vi][:, :2], axis=-1)
                 _d = _d * points_grps[_vi][:, -1]
                 _diff_reprojs.append(_d)
@@ -373,4 +361,4 @@ def geometry_affinity(points_set, Fs, dimGroup):
     affinity_matrix = - (distance_matrix - distance_matrix.mean()) / distance_matrix.std()
     # TODO: add flexible factor
     affinity_matrix = 1 / (1 + np.exp(-5 * affinity_matrix))
-    return affinity_matrix
+    return distance_matrix, affinity_matrix

@@ -1,6 +1,6 @@
 from typing import List
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import matplotlib
 import matplotlib.animation as animation
@@ -63,7 +63,8 @@ def draw_pose(img: np.ndarray, pose: Pose, crop: bool):
 
 
 def draw_poses_concat(poses: List[Pose], imgs: List[np.ndarray],
-                      view_idxs=None, frm_idx=None, crop_height=256):
+                      pose_texts: Optional[List[str]],
+                      top_text=Optional[str], crop_height=256):
     all_crops = []
     for idx, (pose, img) in enumerate(zip(poses, imgs)):
         x1, y1, x2, y2 = pose_to_bb(pose).astype(np.int)
@@ -73,16 +74,16 @@ def draw_poses_concat(poses: List[Pose], imgs: List[np.ndarray],
             new_h = crop_height
             new_w = int((c_w / c_h) * new_h)
             crop = cv2.resize(crop, dsize=(new_w, new_h))
-            if view_idxs is not None:
-                cv2.putText(crop, f'{view_idxs[idx]}', (int(0.5 * new_w), 128),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), thickness=2)
+            if pose_texts is not None:
+                cv2.putText(crop, f'{pose_texts[idx]}', (int(0.05 * new_w), int(0.4 * crop_height)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), thickness=2)
             all_crops.append(crop)
 
     # view_id increasing from left to right
     if all_crops:
         viz = np.concatenate(all_crops, axis=1)
-        if frm_idx is not None:
-            cv2.putText(viz, f'{frm_idx}', (25, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), thickness=2)
+        if top_text is not None:
+            cv2.putText(viz, top_text, (5, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), thickness=2)
         return viz
     else:
         return None
