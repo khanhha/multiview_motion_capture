@@ -91,12 +91,12 @@ def get_fundamental_matrix(p1, p2):
 
 def calc_epipolar_error(cam1: Calib, keypoints_1: np.ndarray, scores_1: np.ndarray,
                         cam2: Calib, keypoints_2: np.ndarray, scores_2: np.ndarray,
-                        score_weighted: bool):
+                        min_valid_kps_score=0.05, invalid_default_error=np.nan):
     f_mat = get_fundamental_matrix(cam1.P, cam2.P)
     n_joint = len(keypoints_1)
 
     if len(keypoints_1) == 0:
-        return np.finfo(np.float32).max
+        return invalid_default_error
 
     epilines_1to2 = cv2.computeCorrespondEpilines(keypoints_1.reshape((-1, 1, 2)), 1, f_mat)
     epilines_1to2 = epilines_1to2.reshape((-1, 3))
@@ -104,15 +104,13 @@ def calc_epipolar_error(cam1: Calib, keypoints_1: np.ndarray, scores_1: np.ndarr
     epilines_2to1 = cv2.computeCorrespondEpilines(keypoints_2.reshape((-1, 1, 2)), 2, f_mat)
     epilines_2to1 = epilines_2to1.reshape((-1, 3))
 
-    invalid_mask = np.isclose(scores_1 * scores_2, 0.0).flatten()
+    valid_mask = (scores_1 * scores_2).flatten() > min_valid_kps_score
 
-    if np.all(invalid_mask):
-        return np.nan
-    else:
+    if np.any(valid_mask):
         total = 0
         cnt = 0
         for i in range(n_joint):
-            if invalid_mask[i]:
+            if not valid_mask[i]:
                 continue
             p1 = keypoints_1[i, :]
             p2 = keypoints_2[i, :]
@@ -122,11 +120,11 @@ def calc_epipolar_error(cam1: Calib, keypoints_1: np.ndarray, scores_1: np.ndarr
             d2 = line_to_point_distance(*l2to1, *p1)
             total = total + 0.5 * (d1 + d2)
             cnt += 1
-        # total_score = max(float(np.sum(kps_cost_factor)), 1e-5)
-        # total = total / total_score  # normalize
         total = total / cnt
 
         return total
+    else:
+        return invalid_default_error
 
 
 def euclidean_to_homogeneous(points):
@@ -215,6 +213,7 @@ def triangulate_point_groups_from_multiple_views_linear(proj_matricies: List[np.
                 _diff_reprojs.append(_d)
             _diff_reprojs = np.array(_diff_reprojs).flatten()
             return _diff_reprojs
+
         try:
             params = kps_3ds[:, :3].flatten().copy()
             res = least_squares(_residual_func, params, max_nfev=n_max_iter)

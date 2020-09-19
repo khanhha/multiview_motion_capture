@@ -93,28 +93,29 @@ def proj2pavC(y):
     return x
 
 
-def transform_closure(X_bin):
+def transform_closure(x_bin):
     """
     Convert binary relation matrix to permutation matrix
-    :param X_bin: torch.tensor which is binarized by a threshold
+    :param x_bin: np.array which is binarized by a threshold
     :return:
     """
-    temp = torch.zeros_like(X_bin)
-    N = X_bin.shape[0]
+    temp = np.zeros_like(x_bin)
+    N = x_bin.shape[0]
     for k in range(N):
         for i in range(N):
             for j in range(N):
-                temp[i][j] = X_bin[i, j] or (X_bin[i, k] and X_bin[k, j])
-    vis = torch.zeros(N)
-    match_mat = torch.zeros_like(X_bin)
+                temp[i, j] = x_bin[i, j] or (x_bin[i, k] and x_bin[k, j])
+
+    vis = np.zeros(N)
+    match_result_mat = np.zeros_like(x_bin)
     for i, row in enumerate(temp):
         if vis[i]:
             continue
         for j, is_relative in enumerate(row):
             if is_relative:
                 vis[j] = 1
-                match_mat[j, i] = 1
-    return match_mat
+                match_result_mat[j, i] = 1
+    return match_result_mat
 
 
 def match_als(W: np.ndarray, dimGroup, **kwargs):
@@ -164,7 +165,8 @@ def match_als(W: np.ndarray, dimGroup, **kwargs):
     mu = 64
     n = X.shape[0]
     maxRank = min(n, maxRank)
-    A = np.random.rand(n, maxRank)
+
+    A = np.random.RandomState(0).rand(n, maxRank)
 
     iter_cnt = 0
     t0 = time.time()
@@ -210,7 +212,7 @@ def match_als(W: np.ndarray, dimGroup, **kwargs):
 
     total_time = time.time() - t0
 
-    match_mat = transform_closure(torch.tensor(X_bin))
+    match_mat = transform_closure(X_bin)
 
     return match_mat, X_bin
 

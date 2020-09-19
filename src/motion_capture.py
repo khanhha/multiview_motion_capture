@@ -91,7 +91,7 @@ class PoseAssociation:
         for pose, cam in zip(self.poses, self.cams):
             error = calc_epipolar_error(cam1=cam, keypoints_1=pose.keypoints, scores_1=pose.keypoints_score,
                                         cam2=cam_o, keypoints_2=pose_o.keypoints, scores_2=pose_o.keypoints_score,
-                                        score_weighted=self.use_weighted_kps_score)
+                                        min_valid_kps_score=0.1, invalid_default_error=np.nan)
             total_error += error
 
             # TODO: hard threshold for cost is variant to image resolution
@@ -390,16 +390,17 @@ class MvTracklet:
         return self.state == TrackState.Dead
 
 
-def reprojection_error(p_3d: Pose, p_2d: Pose, calib: Calib, weighted_score):
+def reprojection_error(p_3d: Pose, p_2d: Pose, calib: Calib, min_valid_kps_score=0.05, invalid_default_error=np.nan):
     p_3d_homo = np.concatenate([p_3d.keypoints, np.ones((len(p_3d.keypoints), 1))], axis=1)
     p_2d_reproj = calib.P @ p_3d_homo.T
     p_2d_reproj = (p_2d_reproj[:2] / (1e-5 + p_2d_reproj[2])).T
-    if weighted_score:
-        score_mask = p_2d.keypoints_score.flatten() * p_3d.keypoints_score.flatten()
-        e = np.linalg.norm(p_2d_reproj - p_2d.keypoints, axis=-1) * score_mask
+
+    score_mask = (p_2d.keypoints_score.flatten() * p_3d.keypoints_score.flatten()) > min_valid_kps_score
+    if any(score_mask):
+        e = np.linalg.norm(p_2d_reproj[score_mask, :2] - p_2d.keypoints[score_mask, :2], axis=-1)
+        return np.mean(e)
     else:
-        e = np.linalg.norm(p_2d_reproj - p_2d.keypoints, axis=-1)
-    return np.mean(e)
+        return invalid_default_error
 
 
 def parse_match_result(match_mat_: np.ndarray, n, dims_group):
@@ -443,6 +444,7 @@ class SpatialTimeMatch:
     tlet_matrix_idxs: Dict[int, int] = field(default_factory=dict)
     dst_mat: np.ndarray = None  # distance matrix
     sim_mat: np.ndarray = None  # similarity matrix
+    match_mat: np.ndarray = None  # binarized matching matrix
 
 
 g_prev_frame_images: List[np.ndarray] = []
@@ -549,6 +551,8 @@ def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> Spat
 
     dim_groups = np.cumsum(part_lens).tolist()
 
+    INVALID_VALUE = np.nan
+
     n_poses = len(poses_3ds_2ds)
     dst_mat = np.zeros((n_poses, n_poses), dtype=np.float)
     for i in range(n_poses):
@@ -573,7 +577,7 @@ def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> Spat
 
                 e_error = calc_epipolar_error(i_calib, i_pose.keypoints, i_pose.keypoints_score,
                                               j_calib, j_pose.keypoints, j_pose.keypoints_score,
-                                              True)
+                                              0.1, INVALID_VALUE)
 
                 dst_mat[i, j] = e_error
 
@@ -582,7 +586,7 @@ def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> Spat
                 p_2d = poses_3ds_2ds[i]
                 calib = cams_calib[mat_idx_to_cam_idxs[i]]
                 p_3d = poses_3ds_2ds[j]
-                e_error = reprojection_error(p_3d, p_2d, calib, True)
+                e_error = reprojection_error(p_3d, p_2d, calib, 0.1, INVALID_VALUE)
                 dst_mat[i, j] = e_error
 
             elif pose_mask[i] == '3d' and pose_mask[j] == '2d':
@@ -590,7 +594,7 @@ def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> Spat
                 p_2d = poses_3ds_2ds[j]
                 calib = cams_calib[mat_idx_to_cam_idxs[j]]
                 p_3d = poses_3ds_2ds[i]
-                e_error = reprojection_error(p_3d, p_2d, calib, True)
+                e_error = reprojection_error(p_3d, p_2d, calib, 0.1, INVALID_VALUE)
                 dst_mat[i, j] = e_error
             else:
                 # no match here
@@ -644,6 +648,7 @@ def match_spatial_time(tlets: List[MvTracklet], frames: List[FrameData]) -> Spat
     # debug
     out_matches.dst_mat = dst_mat
     out_matches.sim_mat = s_mat
+    out_matches.match_mat = x_bin
 
     return out_matches
 
@@ -708,6 +713,7 @@ class MvTracker:
         if debug:
             matches_vizs = debug_draw_spatial_time_matches(frm_idx, st_matches, alive_tracklets, d_frames)
             debug_dir = '/media/F/thesis/data/debug/st_match'
+            os.makedirs(debug_dir, exist_ok=True)
             for idx, viz in enumerate(matches_vizs):
                 cv2.imwrite(f'{debug_dir}/{frm_idx}_{idx}.jpg', viz)
 
@@ -731,6 +737,10 @@ class MvTracker:
             if st_matches.sim_mat is not None:
                 filepath = f'{debug_dir}/{frm_idx}_sim.xlsx'
                 pd.DataFrame(_add_idx_to_mat(st_matches.sim_mat)).to_excel(filepath, index=True)
+
+            if st_matches.sim_mat is not None:
+                filepath = f'{debug_dir}/{frm_idx}_match_binarized.xlsx'
+                pd.DataFrame(_add_idx_to_mat(st_matches.match_mat)).to_excel(filepath, index=True)
 
         # spatial time matches
         for t_idx, tlet in enumerate(alive_tracklets):
