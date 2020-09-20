@@ -266,6 +266,7 @@ class PoseSolver:
         obs_pose_3d = triangulate_point_groups_from_multiple_views_linear(self.cam_projs,
                                                                           self.cam_poses_2d, 0.01, True)
         # debug
+
         return (PoseShapeParam(root=np.zeros((3,)),
                                euler_angles=np.zeros((17, 3)), bone_lens=np.zeros((17, 3))),
                 Pose(keypoints=obs_pose_3d[:, :3],

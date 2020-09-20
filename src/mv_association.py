@@ -152,9 +152,10 @@ def match_als(W: np.ndarray, dimGroup, **kwargs):
     # maxRank = max(dimGroup) * 4
     n_max_pp = np.diff(dimGroup)
     maxRank = max(n_max_pp) + 2
+    # maxRank = max(n_max_pp) * 4
 
     pSelect = 1
-    tol = 5e-4
+    tol = 1e-4
     maxIter = 1000
     verbose = False
     eigenvalues = False
@@ -174,8 +175,7 @@ def match_als(W: np.ndarray, dimGroup, **kwargs):
         X0 = X.copy()
         X = Z - (Y - W + beta) / mu
         B = (np.linalg.inv(A.T @ A + alpha / mu * np.eye(maxRank)) @ (A.T @ X)).T
-        A = (np.linalg.inv(B.T @ B + alpha / mu * np.eye(maxRank)) @ (
-                B.T @ X.T)).T
+        A = (np.linalg.inv(B.T @ B + alpha / mu * np.eye(maxRank)) @ (B.T @ X.T)).T
         X = A @ B.T
 
         Z = X + Y / mu
