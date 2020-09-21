@@ -217,7 +217,7 @@ def match_als(W: np.ndarray, dimGroup, **kwargs):
     return match_mat, X_bin
 
 
-def matchSVT(S, dimGroup, **kwargs):
+def match_svt(S, dimGroup, **kwargs):
     alpha = kwargs.get('alpha', 0.1)
     pSelect = kwargs.get('pselect', 1)
     tol = kwargs.get('tol', 5e-4)
@@ -230,6 +230,8 @@ def matchSVT(S, dimGroup, **kwargs):
     if verbose:
         print('Running SVT-Matching: alpha = %.2f, pSelect = %.2f _lambda = %.2f \n' % (
             alpha, pSelect, _lambda))
+
+    S = torch.from_numpy(S)
     info = dict()
     N = S.shape[0]
     S[torch.arange(N), torch.arange(N)] = 0
@@ -305,7 +307,7 @@ def matchSVT(S, dimGroup, **kwargs):
     if verbose:
         print(f"Alg terminated. Time = {info['time']}, #Iter = {info['iter']}, Res = ({pRes}, {dRes}), mu = {mu} \n")
     match_mat = transform_closure(X_bin)
-    return torch.tensor(match_mat)
+    return match_mat, X_bin
 
 
 def match_multiview_poses(cam_poses: List[List[Pose]], calibs: List[Calib]):

@@ -31,7 +31,7 @@ from mv_math_util import (Calib, calc_epipolar_error, triangulate_point_groups_f
                           project_3d_points_to_image_plane_without_distortion, unproject_uv_to_rays,
                           points_to_lines_distances, calc_pairwise_f_mats, geometry_affinity, get_fundamental_matrix)
 from pose_viz import plot_poses_3d
-from mv_association import match_als
+from mv_association import match_als, match_svt
 from enum import Enum
 from inverse_kinematics import PoseShapeParam, Skeleton, PoseSolver, load_skeleton
 from pose_viz import draw_poses_concat, draw_pose_epiplar_lines, draw_pose
@@ -669,19 +669,20 @@ def match_spatial_time(tlets: List[MvTracklet],
 
     # applying hard threshold
     # max_dst_value = np.nanmax(dst_mat)
-    max_dst_value = pixel_error_threshold  # in pixel unit. need to adjust for different resolutions
+    max_dst_value = np.nanmax(dst_mat)  # in pixel unit. need to adjust for different resolutions
     dst_mat[np.isnan(dst_mat)] = max_dst_value + 1.0
 
-    impossible_match_mask = dst_mat > pixel_error_threshold
-    dst_mat[impossible_match_mask] = max_dst_value + 1.0
+    # valid_values_mask = np.bitwise_and(dst_mat < 30.0, dst_mat > 0.01)
+    # valid_values = dst_mat[valid_values_mask]
+    # mean, std = np.mean(valid_values), np.std(valid_values)
+    mean, std = 7, 5 # TODO: adjust it for different resolutions
+    s_mat = - (dst_mat - mean) / std
 
-    s_mat = - (dst_mat - dst_mat.mean()) / dst_mat.std()
     # TODO: add flexible factor
     s_mat = 1 / (1 + np.exp(-5 * s_mat))
 
-    # again for sure. otherwise, similarity of impossible match is still around 0.04..
-    s_mat[impossible_match_mask] = 0.0
     match_mat, x_bin = match_als(s_mat, dim_groups)
+    # match_mat, x_bin = match_svt(s_mat, dim_groups)
 
     dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
     for cur_matches in dim_groups_matches:
@@ -805,7 +806,7 @@ class MvTracker:
         # only do association with alive tracks
         alive_tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
 
-        if frm_idx == 117:
+        if frm_idx == 110:
             debug = True
         else:
             debug = False
