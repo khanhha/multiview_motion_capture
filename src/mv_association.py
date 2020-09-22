@@ -6,7 +6,9 @@ import numpy as np
 import cv2
 from pose_def import Pose
 from typing import List
+from scipy.sparse.linalg import eigs
 from mv_math_util import Calib, calc_pairwise_f_mats, geometry_affinity
+from scipy.optimize import linear_sum_assignment
 
 
 def myproj2dpam(Y, tol=1e-4):
@@ -116,6 +118,49 @@ def transform_closure(x_bin):
                 vis[j] = 1
                 match_result_mat[j, i] = 1
     return match_result_mat
+
+
+def biparti(sim_mat):
+    n, m = sim_mat.shape
+    rows, cols = linear_sum_assignment(sim_mat, maximize=True)
+    p = np.zeros_like(sim_mat)
+    p[rows, cols] = 1
+    return p
+
+
+def match_eig(s_mat: np.ndarray, dims_group):
+    # s_mat[np.arange(len(s_mat)), np.arange(len(s_mat))] = 0
+    dim_p = np.diff(dims_group)
+    n = len(dim_p)
+    d = max(dim_p)
+    z_mat = np.zeros_like(s_mat)
+    for i in range(n):
+        for j in range(n):
+            # if i == j:
+            #     continue
+            ibs, ibe = dims_group[i], dims_group[i+1]
+            jbs, jbe = dims_group[j], dims_group[j+1]
+            blk_s = s_mat[ibs:ibe, jbs:jbe]
+            z_mat[ibs:ibe, jbs:jbe] = biparti(blk_s)
+
+    d_mat, u_mat = np.linalg.eig(z_mat)
+    # u_mat, d_mat = eigs(z_mat, d)
+    d_mat = d_mat[:d]
+    u_mat = u_mat[:, :d]
+    u_mat = u_mat * np.sqrt(d_mat)
+    z_out = np.zeros_like(s_mat)
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            ibs, ibe = dims_group[i], dims_group[i+1]
+            jbs, jbe = dims_group[j], dims_group[j+1]
+            zb = u_mat[ibs:ibe, :] @ u_mat[jbs:jbe].T
+            zb[zb < 0] = 0
+            z_out[ibs:ibe, jbs:jbe] = biparti(zb)
+
+    match_mat = transform_closure(z_out)
+    return match_mat, z_out
 
 
 def match_als(W: np.ndarray, dimGroup, **kwargs):
