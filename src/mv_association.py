@@ -252,7 +252,7 @@ def match_als(W: np.ndarray, dimGroup, **kwargs):
     beta = 0.1
     # maxRank = max(dimGroup) * 4
     n_max_pp = np.diff(dimGroup)
-    maxRank = max(n_max_pp) + 2
+    maxRank = max(n_max_pp) * 2
     # maxRank = max(n_max_pp) * 4
 
     pSelect = 1

@@ -323,7 +323,7 @@ class MvTracklet:
                  cam_projs: List[np.ndarray],
                  skel: Skeleton,
                  n_inits: int = 3,
-                 max_age: int = 3):
+                 max_age: int = 0):
         self.frame_idxs: List[int] = [frm_idx]
         self.cam_poses_2d: List[List[Tuple[int, Pose]]] = [cam_poses_2d]
         self.cam_projs: List[List[np.ndarray]] = [cam_projs]
@@ -448,6 +448,25 @@ class SpatialTimeMatch:
     sim_mat: np.ndarray = None  # similarity matrix
     match_mat: np.ndarray = None  # binarized matching matrix
 
+    def find_spatial_match(self, view_idx, pose_id) -> Optional[SpatialMatch]:
+        for s_match in self.spatial_matches:
+            for v_idx_, p_id_ in zip(s_match.view_idxs, s_match.pose_ids):
+                if v_idx_ == view_idx and p_id_ == pose_id:
+                    return s_match
+
+        for tlet_idx, s_match in self.spatial_time_matches.items():
+            for v_idx_, p_id_ in zip(s_match.view_idxs, s_match.pose_ids):
+                if v_idx_ == view_idx and p_id_ == pose_id:
+                    return s_match
+        return None
+
+    def find_matrix_idx_from_view_pose_id(self, view_idx, pose_id):
+        pose_ids_mat_idxs = self.view_pose_matrix_idxs[view_idx]
+        for pair in pose_ids_mat_idxs:
+            if pair[0] == pose_id:
+                return pair[1]
+        return None
+
 
 g_prev_frame_images: List[np.ndarray] = []
 g_cur_frame_images: List[np.ndarray] = []
@@ -474,6 +493,39 @@ def debug_draw_dst_matrix_elemets(frame_idx, st_matches: SpatialTimeMatch, d_fra
                                   top_text=f'{frame_idx}',
                                   crop_height=256)
         st_vizs.append(viz_1)
+
+    return st_vizs
+
+
+def debug_draw_unmatched_elements(frame_idx,
+                                  st_matches: SpatialTimeMatch,
+                                  tracklets: List[MvTracklet],
+                                  d_frames: List[FrameData]):
+    st_vizs = []
+    crop_height = 256
+    for tlet_idx, tlet in enumerate(tracklets):
+        # we have one unmatched element. visualize it for debugging
+        if tlet_idx not in st_matches.spatial_time_matches:
+            tlet_poses = [x[1] for x in tlet.cam_poses_2d[-1]]
+            tlet_cam_idxs = [x[0] for x in tlet.cam_poses_2d[-1]]
+            tlet_cam_imgs = [g_prev_frame_images[c_idx] for c_idx in tlet_cam_idxs]
+            viz_tlet = draw_poses_concat(tlet_poses, tlet_cam_imgs, None,
+                                         top_text=f'{frame_idx - 1}_{st_matches.tlet_matrix_idxs[tlet_idx]}',
+                                         crop_height=crop_height)
+            st_vizs.append(viz_tlet)
+
+    for view_idx, frm in enumerate(d_frames):
+        for p_id in frm.poses.keys():
+            s_match = st_matches.find_spatial_match(view_idx, p_id)
+            # we have one unmatched element. visualize it for debugging
+            if s_match is None:
+                poses = [frm.poses[p_id]]
+                cam_imgs = [g_prev_frame_images[view_idx]]
+                mat_idx = st_matches.find_matrix_idx_from_view_pose_id(view_idx, p_id)
+                viz = draw_poses_concat(poses, cam_imgs, pose_texts=[f'{view_idx}-{mat_idx}'],
+                                        top_text=f'{frame_idx}',
+                                        crop_height=crop_height)
+                st_vizs.append(viz)
 
     return st_vizs
 
@@ -652,6 +704,9 @@ def match_spatial_time(tlets: List[MvTracklet],
                 e_error = reprojection_error(p_3d, p_2d, calib, 0.1, INVALID_VALUE)
                 dst_mat[mat_idx, j] = e_error
 
+                # for debugging
+                out_matches.tlet_matrix_idxs[mat_idx_to_tracklet_ids[j]] = j
+
             elif pose_mask[mat_idx] == '3d' and pose_mask[j] == '2d':
                 # re-projection error
                 p_2d = poses_3ds_2ds[j]
@@ -659,6 +714,9 @@ def match_spatial_time(tlets: List[MvTracklet],
                 p_3d = poses_3ds_2ds[mat_idx]
                 e_error = reprojection_error(p_3d, p_2d, calib, 0.1, INVALID_VALUE)
                 dst_mat[mat_idx, j] = e_error
+
+                # for debugging
+                out_matches.tlet_matrix_idxs[mat_idx_to_tracklet_ids[mat_idx]] = mat_idx
 
             elif pose_mask[mat_idx] == '3d' and pose_mask[j] == '3d':
                 dst_mat[mat_idx, j] = INVALID_VALUE
@@ -675,12 +733,13 @@ def match_spatial_time(tlets: List[MvTracklet],
     # valid_values_mask = np.bitwise_and(dst_mat < 30.0, dst_mat > 0.01)
     # valid_values = dst_mat[valid_values_mask]
     # mean, std = np.mean(valid_values), np.std(valid_values)
-    mean, std = 7, 5 # TODO: adjust it for different resolutions
-    s_mat = - (dst_mat - mean) / std
+    mean, std = 15, 30  # TODO: adjust it for different resolutions
+    s_mat = (dst_mat - mean) / std
 
     # TODO: add flexible factor
-    s_mat = 1 / (1 + np.exp(-5 * s_mat))
-
+    s_mat = 1 / (1 + np.exp(5 * s_mat))
+    s_mat[s_mat < 1e-3] = 0
+    s_mat[s_mat > 1.0] = 1.0
     # match_mat, x_bin = match_bip(s_mat, 0.3)
     match_mat, x_bin = match_als(s_mat, dim_groups)
     # match_mat, x_bin = match_svt(s_mat, dim_groups)
@@ -715,8 +774,6 @@ def match_spatial_time(tlets: List[MvTracklet],
 
             if len(s_match) > 0:
                 out_matches.spatial_time_matches[tracklet_idx] = s_match
-                # for debugging
-                out_matches.tlet_matrix_idxs[tracklet_idx] = tracklet_global_idx
 
         else:
             # the match consists of only 2d poses
@@ -808,7 +865,7 @@ class MvTracker:
         # only do association with alive tracks
         alive_tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
 
-        if frm_idx == 110:
+        if frm_idx == 8:
             debug = True
         else:
             debug = False
@@ -817,45 +874,41 @@ class MvTracker:
 
         debug = True
         if debug:
+            # draw matched elements
             matches_vizs = debug_draw_spatial_time_matches(frm_idx, st_matches, alive_tracklets, d_frames)
-            debug_dir = '/media/F/thesis/data/debug/st_match'
+            debug_dir = '/media/F/thesis/data/debug/st_unmatch_match'
             os.makedirs(debug_dir, exist_ok=True)
             for idx, viz in enumerate(matches_vizs):
                 if viz is not None:
-                    cv2.imwrite(f'{debug_dir}/{frm_idx}_{idx}.jpg', viz)
+                    cv2.imwrite(f'{debug_dir}/{frm_idx}_match_{idx}.jpg', viz)
 
-            # debug_dir = '/media/F/thesis/data/debug/frame_poses'
-            # os.makedirs(debug_dir, exist_ok=True)
-            # frames_poses_vizs = debug_draw_frame_poses(frm_idx, d_frames)
-            # for idx, viz in enumerate(frames_poses_vizs):
-            #     cv2.imwrite(f'{debug_dir}/{frm_idx}_{idx}.jpg', viz)
+            unmatch_vizs = debug_draw_unmatched_elements(frm_idx, st_matches, alive_tracklets, d_frames)
+            for idx, viz in enumerate(unmatch_vizs):
+                if viz is not None:
+                    cv2.imwrite(f'{debug_dir}/{frm_idx}_unmatch_{idx}.jpg', viz)
 
+            # draw un-matched elements
+
+            # draw all matching input
             debug_dir = '/media/F/thesis/data/debug/frame_poses'
             os.makedirs(debug_dir, exist_ok=True)
             frames_poses_vizs = debug_draw_dst_matrix_elemets(frm_idx, st_matches, d_frames)
             for idx, viz in enumerate(frames_poses_vizs):
                 cv2.imwrite(f'{debug_dir}/{frm_idx}_{idx}.jpg', viz)
 
-            def _add_idx_to_mat(mat_: np.ndarray):
-                """
-                for visualizing correct index in excel
-                :param mat_:
-                :return:
-                """
-                return mat_
-
+            # export cost matrix for debugging
             debug_dir = '/media/F/thesis/data/debug/cost_matrix'
             os.makedirs(debug_dir, exist_ok=True)
             if st_matches.dst_mat is not None:
                 filepath = f'{debug_dir}/{frm_idx}_dst.xlsx'
-                pd.DataFrame(_add_idx_to_mat(st_matches.dst_mat)).to_excel(filepath, index=True)
+                pd.DataFrame(st_matches.dst_mat).to_excel(filepath, index=True)
             if st_matches.sim_mat is not None:
                 filepath = f'{debug_dir}/{frm_idx}_sim.xlsx'
-                pd.DataFrame(_add_idx_to_mat(st_matches.sim_mat)).to_excel(filepath, index=True)
+                pd.DataFrame(st_matches.sim_mat).to_excel(filepath, index=True)
 
             if st_matches.sim_mat is not None:
                 filepath = f'{debug_dir}/{frm_idx}_match_binarized.xlsx'
-                pd.DataFrame(_add_idx_to_mat(st_matches.match_mat)).to_excel(filepath, index=True)
+                pd.DataFrame(st_matches.match_mat).to_excel(filepath, index=True)
 
         # spatial time matches
         for t_idx, tlet in enumerate(alive_tracklets):
