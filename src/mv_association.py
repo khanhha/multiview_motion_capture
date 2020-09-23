@@ -9,6 +9,7 @@ from typing import List
 from scipy.sparse.linalg import eigs
 from mv_math_util import Calib, calc_pairwise_f_mats, geometry_affinity
 from scipy.optimize import linear_sum_assignment
+from pulp import LpMaximize, LpProblem, LpStatus, lpSum, LpVariable
 
 
 def myproj2dpam(Y, tol=1e-4):
@@ -120,6 +121,61 @@ def transform_closure(x_bin):
     return match_result_mat
 
 
+def match_bip(cor_mat, min_cor=0.2):
+    n = cor_mat.shape[0]
+    edge_vars = {}
+    edge_w = {}
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                cor_mat[i, j] = 0.0
+
+    for u in range(n):
+        for j in range(u + 1, n):
+            if cor_mat[u, j] > min_cor:
+                edge_vars[(u, j)] = LpVariable(name=f'{u}_{j}', cat='Binary')
+                c = 2.0 * (cor_mat[u, j] - .5)
+                edge_w[(u, j)] = c
+
+    n_vars = len(edge_vars)
+    ineq_vars = []
+    for u in range(n_vars):
+        for v in range(u + 1, n_vars):
+            for t in range(v + 1, n_vars):
+                uv = edge_vars.get((u, v), None)
+                vt = edge_vars.get((v, t), None)
+                ut = edge_vars.get((u, t), None)
+                if uv is not None and vt is not None and ut is not None:
+                    ineq_vars.append(uv + vt <= 1 + ut)
+
+    weighted_vars = []
+    for ij, var in edge_vars.items():
+        weighted_vars.append(edge_w[ij] * var)
+
+    model = LpProblem(name="mv_match", sense=LpMaximize)
+    # for ineq_var in ineq_vars:
+    #     model += ineq_var
+    model += lpSum(weighted_vars)
+    status = model.solve()
+    # print(f"status: {model.status}, {LpStatus[model.status]}")
+    # print(f"objective: {model.objective.value()}")
+    #
+    # for name, constraint in model.constraints.items():
+    #     print(f"{name}: {constraint.value()}")
+
+    x_bin = np.zeros_like(cor_mat)
+    for var in model.variables():
+        # print(f"{var.name}: {var.value()}")
+        i, j = [int(p) for p in var.name.split('_')]
+        b = var.value()
+        x_bin[i, j] = b
+        x_bin[j, i] = b
+
+    match_mat = transform_closure(x_bin)
+
+    return match_mat, x_bin
+
+
 def biparti(sim_mat):
     n, m = sim_mat.shape
     rows, cols = linear_sum_assignment(sim_mat, maximize=True)
@@ -138,8 +194,8 @@ def match_eig(s_mat: np.ndarray, dims_group):
         for j in range(n):
             # if i == j:
             #     continue
-            ibs, ibe = dims_group[i], dims_group[i+1]
-            jbs, jbe = dims_group[j], dims_group[j+1]
+            ibs, ibe = dims_group[i], dims_group[i + 1]
+            jbs, jbe = dims_group[j], dims_group[j + 1]
             blk_s = s_mat[ibs:ibe, jbs:jbe]
             z_mat[ibs:ibe, jbs:jbe] = biparti(blk_s)
 
@@ -153,8 +209,8 @@ def match_eig(s_mat: np.ndarray, dims_group):
         for j in range(n):
             if i == j:
                 continue
-            ibs, ibe = dims_group[i], dims_group[i+1]
-            jbs, jbe = dims_group[j], dims_group[j+1]
+            ibs, ibe = dims_group[i], dims_group[i + 1]
+            jbs, jbe = dims_group[j], dims_group[j + 1]
             zb = u_mat[ibs:ibe, :] @ u_mat[jbs:jbe].T
             zb[zb < 0] = 0
             z_out[ibs:ibe, jbs:jbe] = biparti(zb)

@@ -31,7 +31,7 @@ from mv_math_util import (Calib, calc_epipolar_error, triangulate_point_groups_f
                           project_3d_points_to_image_plane_without_distortion, unproject_uv_to_rays,
                           points_to_lines_distances, calc_pairwise_f_mats, geometry_affinity, get_fundamental_matrix)
 from pose_viz import plot_poses_3d
-from mv_association import match_als, match_svt, match_eig
+from mv_association import match_als, match_svt, match_eig, match_bip
 from enum import Enum
 from inverse_kinematics import PoseShapeParam, Skeleton, PoseSolver, load_skeleton
 from pose_viz import draw_poses_concat, draw_pose_epiplar_lines, draw_pose
@@ -681,6 +681,7 @@ def match_spatial_time(tlets: List[MvTracklet],
     # TODO: add flexible factor
     s_mat = 1 / (1 + np.exp(-5 * s_mat))
 
+    # match_mat, x_bin = match_bip(s_mat, 0.3)
     match_mat, x_bin = match_als(s_mat, dim_groups)
     # match_mat, x_bin = match_svt(s_mat, dim_groups)
     # match_mat, x_bin = match_eig(s_mat, dim_groups)
