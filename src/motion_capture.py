@@ -375,6 +375,17 @@ class MvTracklet:
         if self.is_tentative() and self.hits >= self.n_inits:
             self.state = TrackState.Confirmed
 
+    def debug_solve_last_pose_3d(self):
+        cam_poses = self.cam_poses_2d[-1]
+        cam_projs = self.cam_projs[-1]
+        solver = PoseSolver(self.skel,
+                            init_pose=self.poses[-1][0],
+                            cam_poses_2d=[p[1].to_kps_array() for p in cam_poses],
+                            cam_projs=cam_projs,
+                            obs_kps_format=cam_poses[0][1].pose_type)
+        pparam, pose = solver.solve()
+        return pparam, pose
+
     def mark_missed(self):
         if self.state == TrackState.Tentative:
             self.state = TrackState.Dead
@@ -715,6 +726,10 @@ def match_spatial_time(tlets: List[MvTracklet],
                 e_error = reprojection_error(p_3d, p_2d, calib, 0.1, INVALID_VALUE)
                 dst_mat[mat_idx, j] = e_error
 
+                debug_trig = False
+                if debug_trig:
+                    tlets[mat_idx_to_tracklet_ids[mat_idx]].debug_solve_last_pose_3d()
+
                 # for debugging
                 out_matches.tlet_matrix_idxs[mat_idx_to_tracklet_ids[mat_idx]] = mat_idx
 
@@ -748,12 +763,10 @@ def match_spatial_time(tlets: List[MvTracklet],
     dim_groups_matches = parse_match_result(match_mat, s_mat.shape[0], dim_groups)
     for cur_matches in dim_groups_matches:
         tracklet_idx = -1
-        tracklet_global_idx = -1
         # first check if there is a tracklet [time-dim] in the match
         for grp_idx, local_idx, global_idx in cur_matches:
             if pose_mask[global_idx] == '3d':
                 tracklet_idx = mat_idx_to_tracklet_ids[global_idx]
-                tracklet_global_idx = global_idx
                 break
 
         if tracklet_idx >= 0:
@@ -865,10 +878,8 @@ class MvTracker:
         # only do association with alive tracks
         alive_tracklets = [tlet for tlet in self.tracklets if not tlet.is_dead()]
 
-        if frm_idx == 8:
-            debug = True
-        else:
-            debug = False
+        if frm_idx == 131:
+            hello = True
 
         st_matches = associate_tracking(alive_tracklets, d_frames, min_pixel_error_hard_threshold=50)
 
@@ -1003,6 +1014,29 @@ def test_ik_tlet(tlet: MvTracklet):
         run_test_ik(p_3d.keypoints, [p.to_kps_array() for p in cam_poses], cam_projs)
 
 
+def filter_bad_pose(smt_frm: FrameData, min_valid_kps_score, n_min_valid_kps, min_valib_bb_size):
+    bad_poses_ids = []
+    for p_id, pose in smt_frm.poses.items():
+        valid_kps_mask = (pose.keypoints_score > min_valid_kps_score).flatten()
+        if np.sum(valid_kps_mask) < n_min_valid_kps:
+            bad_poses_ids.append(p_id)
+            continue
+
+        valid_kps = pose.keypoints[valid_kps_mask, :2]
+        bmin, bmax = np.min(valid_kps, axis=0), np.max(valid_kps, axis=0)
+        bsize = bmax - bmin
+        if any(bsize < min_valib_bb_size):
+            bad_poses_ids.append(p_id)
+            continue
+
+    if bad_poses_ids:
+        print(f'remove {len(bad_poses_ids)} bad poses')
+        for p_id in bad_poses_ids:
+            del smt_frm.poses[p_id]
+
+    return smt_frm
+
+
 def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     global g_cur_frame_images
     global g_prev_frame_images
@@ -1037,6 +1071,12 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
             # if frm_idx < 90:
             #     continue
 
+            # filter invalid, bad poses
+            # bad poses:
+            # - less then n_min_valid_kps valid points.
+            # - any bb dimension smaller than min_valid_bb_size
+            d_frames = [filter_bad_pose(frm, min_valid_kps_score=0.01, n_min_valid_kps=4, min_valib_bb_size=5)
+                        for frm in d_frames]
             test_spatial = False
             if test_spatial:
                 s_matches = match_spatial(d_frames)

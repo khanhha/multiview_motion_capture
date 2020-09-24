@@ -70,24 +70,28 @@ def draw_poses_concat(poses: List[Pose], imgs: List[np.ndarray],
                       pose_texts: Optional[List[str]],
                       top_text=Optional[str], crop_height=256, draw_kps=True):
     all_crops = []
-    for idx, (pose, img) in enumerate(zip(poses, imgs)):
+    for idx, (pose, img_) in enumerate(zip(poses, imgs)):
+        img = img_.copy()
         x1, y1, x2, y2 = pose_to_bb(pose).astype(np.int)
-        if y2 > y1 + 5 and x2 > x1 + 5:
-            if draw_kps:
-                n_kps = len(pose.keypoints)
-                for kps_idx in range(n_kps):
-                    x, y = pose.keypoints[kps_idx, :2].astype(np.int)
-                    cv2.circle(img, (x, y), 2, color=(0, 0, 255), thickness=2, lineType=cv2.FILLED)
+        is_valid_box = y2 > y1 + 5 and x2 > x1 + 5
+        if draw_kps:
+            n_kps = len(pose.keypoints)
+            for kps_idx in range(n_kps):
+                x, y = pose.keypoints[kps_idx, :2].astype(np.int)
+                cv2.circle(img, (x, y), 2, color=(0, 0, 255), thickness=2, lineType=cv2.FILLED)
 
+        if is_valid_box:
             crop = img[y1:y2, x1:x2]
-            c_h, c_w = crop.shape[:2]
-            new_h = crop_height
-            new_w = int((c_w / c_h) * new_h)
-            crop = cv2.resize(crop, dsize=(new_w, new_h))
-            if pose_texts is not None:
-                cv2.putText(crop, f'{pose_texts[idx]}', (int(0.05 * new_w), int(0.4 * crop_height)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), thickness=1)
-            all_crops.append(crop)
+        else:
+            crop = img
+        c_h, c_w = crop.shape[:2]
+        new_h = crop_height
+        new_w = int((c_w / c_h) * new_h)
+        crop = cv2.resize(crop, dsize=(new_w, new_h))
+        if pose_texts is not None:
+            cv2.putText(crop, f'{pose_texts[idx]}', (int(0.05 * new_w), int(0.4 * crop_height)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), thickness=1)
+        all_crops.append(crop)
 
     # view_id increasing from left to right
     if all_crops:

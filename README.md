@@ -47,3 +47,6 @@ python ./motion_capture.py --model run --video_dir ./data/shelf/videos --data_di
 ```
 python ./motion_capture.py --tlet_path ./data/shelf/tracklets/tracklets.pkl
 ```
+
+#TODO
+- debug frame 131. black guy is failed
