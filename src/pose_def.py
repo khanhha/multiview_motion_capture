@@ -196,9 +196,9 @@ _BASIC_18_PARENTS = {
     KpsType.R_Shoulder: KpsType.Neck,
     KpsType.R_Elbow: KpsType.R_Shoulder,
     KpsType.R_Wrist: KpsType.R_Elbow,
-    KpsType.Head_Bottom: KpsType.Neck,
-    KpsType.L_Ear: KpsType.Head_Bottom,
-    KpsType.R_Ear: KpsType.Head_Bottom
+    KpsType.Nose: KpsType.Neck,
+    KpsType.L_Ear: KpsType.Nose,
+    KpsType.R_Ear: KpsType.Nose
 }
 
 _BASIC_18 = [KpsType.Mid_Hip,
@@ -216,7 +216,7 @@ _BASIC_18 = [KpsType.Mid_Hip,
              KpsType.R_Shoulder,
              KpsType.R_Elbow,
              KpsType.R_Wrist,
-             KpsType.Head_Bottom,
+             KpsType.Nose,
              KpsType.L_Ear,
              KpsType.R_Ear]
 
@@ -251,7 +251,7 @@ _M_Side_Joints = [
     KpsType.Mid_Hip,
     KpsType.Spine,
     KpsType.Neck,
-    KpsType.Head_Bottom
+    KpsType.Nose
 ]
 
 _L_Side_Joints_Index = [_BASIC_18_Index[jtype] for jtype in _L_Side_Joints]

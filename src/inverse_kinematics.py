@@ -134,9 +134,9 @@ def load_skeleton():
         [-0.2, 0, 0],
         [-0.3, 0, 0],
         [-0.3, 0, 0],
-        [0, 0, 0.3],
-        [0.07, 0, 0.1],
-        [-0.07, 0, 0.1]
+        [0, -0.02, 0.15],
+        [+0.07, 0.02, 0.1],
+        [-0.07, 0.02, 0.1]
     ]
 
     kps_format = KpsFormat.BASIC_18
@@ -322,7 +322,8 @@ class PoseSolver:
             n_max_iter = 5
 
         param_1 = solve_pose(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, init_param, n_max_iter)
-        param_2 = solve_pose_bone_lens(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, param_1, n_max_iter)
+        param_2 = solve_pose_bone_lens(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, param_1,
+                                       n_max_iter)
 
         pred_locs_2, _ = foward_kinematics(self.skel, param_2)
 
