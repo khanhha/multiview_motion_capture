@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
-
+from typing import Optional, Dict
+import copy
 import numpy as np
 
 
@@ -227,6 +227,37 @@ _BASIC_18_PARENTS_Index = [_BASIC_18_Index[_BASIC_18_PARENTS[jtype]] if _BASIC_1
 _BASIC_18_Bone_Index = [(kps_idx, _BASIC_18_PARENTS_Index[kps_idx])
                         for kps_idx in range(len(_BASIC_18)) if _BASIC_18_PARENTS_Index[kps_idx] >= 0]
 
+_L_Side_Joints = [
+    KpsType.L_Hip,
+    KpsType.L_Knee,
+    KpsType.L_Ankle,
+    KpsType.L_Shoulder,
+    KpsType.L_Elbow,
+    KpsType.L_Wrist,
+    KpsType.L_Ear
+]
+
+_R_Side_Joints = [
+    KpsType.R_Hip,
+    KpsType.R_Knee,
+    KpsType.R_Ankle,
+    KpsType.R_Shoulder,
+    KpsType.R_Elbow,
+    KpsType.R_Wrist,
+    KpsType.R_Ear
+]
+
+_M_Side_Joints = [
+    KpsType.Mid_Hip,
+    KpsType.Spine,
+    KpsType.Neck,
+    KpsType.Head_Bottom
+]
+
+_L_Side_Joints_Index = [_BASIC_18_Index[jtype] for jtype in _L_Side_Joints]
+_R_Side_Joints_Index = [_BASIC_18_Index[jtype] for jtype in _R_Side_Joints]
+_M_Side_Joints_Index = [_BASIC_18_Index[jtype] for jtype in _M_Side_Joints]
+
 
 def conversion_openpose_25_to_coco(poses_openpose):
     n_joint = len(_COCO)
@@ -244,6 +275,16 @@ def map_to_common_keypoints(pose_0: Pose, pose_1: Pose):
     return pose_0.to_kps_array()[kps_idxs_0, :], pose_1.to_kps_array()[kps_idxs_1, :]
 
 
+def get_common_kps_idxs_1(src_kps_idx_map: Dict[KpsType, int], dst_kps_idx_map: Dict[KpsType, int]):
+    src_idxs = []
+    dst_idxs = []
+    for src_kps, src_idx in src_kps_idx_map.items():
+        if src_kps in dst_kps_idx_map:
+            src_idxs.append(src_idx)
+            dst_idxs.append(dst_kps_idx_map[src_kps])
+    return src_idxs, dst_idxs
+
+
 def get_common_kps_idxs(src_p_type, dst_p_type):
     src_order = get_kps_order(src_p_type)
     dst_idx_map = get_kps_index(dst_p_type)
@@ -257,13 +298,50 @@ def get_common_kps_idxs(src_p_type, dst_p_type):
     return src_idxs, dst_idxs
 
 
+def get_sides_joints(p_type):
+    if p_type == KpsFormat.BASIC_18:
+        return copy.copy(_L_Side_Joints), copy.copy(_R_Side_Joints), copy.copy(_M_Side_Joints)
+    else:
+        raise ValueError(f'get_sides_joints {p_type}')
+
+
+def get_sides_joint_idxs(p_type):
+    if p_type == KpsFormat.BASIC_18:
+        return copy.copy(_L_Side_Joints_Index), copy.copy(_R_Side_Joints_Index), copy.copy(_M_Side_Joints_Index)
+    else:
+        raise ValueError(f'get_lside_joint_idxs {p_type}')
+
+
+def get_joint_side(jnt_type: KpsType):
+    jnt_name = jnt_type.name
+    if jnt_name.startswith('L_'):
+        return 'left'
+    elif jnt_name.startswith('R'):
+        return 'right'
+    else:
+        return 'mid'
+
+
+def get_flip_joint(jnt_type: KpsType):
+    jnt_name = jnt_type.name
+    jnt_side = get_joint_side(jnt_type)
+    if jnt_side == 'left':
+        jnt_name = jnt_name.replace('L_', 'R_')
+        return KpsType.__members__[jnt_name]
+    elif jnt_side == 'right':
+        jnt_name = jnt_name.replace('R_', 'L_')
+        return KpsType.__members__[jnt_name]
+    else:
+        return jnt_type
+
+
 def get_pose_bones_index(p_type):
     if p_type == KpsFormat.COCO:
-        return _COCO_Bone_Index
+        return copy.copy([_COCO_Bone_Index])
     elif p_type == KpsFormat.SMPLX_22:
-        return _SMPLX_22_Bone_Index
+        return copy.copy(_SMPLX_22_Bone_Index)
     elif p_type == KpsFormat.BASIC_18:
-        return _BASIC_18_Bone_Index
+        return copy.copy(_BASIC_18_Bone_Index)
     else:
         raise ValueError(f'get_pose_bones_index: {p_type}')
 
@@ -283,19 +361,19 @@ def get_kps_order(p_type):
 
 def get_kps_index(p_type):
     if p_type == KpsFormat.COCO:
-        return _COCO_Index
+        return copy.copy(_COCO_Index)
     elif p_type == KpsFormat.OPENPOSE_25:
-        return _OPENPOSE_25_INDEX
+        return copy.copy(_OPENPOSE_25_INDEX)
     elif p_type == KpsFormat.SMPLX_22:
-        return _SMPLX_22_Index
+        return copy.copy(_SMPLX_22_Index)
     elif p_type == KpsFormat.BASIC_18:
-        return _BASIC_18_Index
+        return copy.copy(_BASIC_18_Index)
     else:
         raise ValueError('get_kps_index')
 
 
 def get_parent_index(p_type):
     if p_type == KpsFormat.BASIC_18:
-        return _BASIC_18_PARENTS_Index
+        return copy.copy(_BASIC_18_PARENTS_Index)
     else:
         raise ValueError(f'get_parent_index: {p_type}')

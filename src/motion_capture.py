@@ -403,13 +403,14 @@ class MvTracklet:
 
 
 def reprojection_error(p_3d: Pose, p_2d: Pose, calib: Calib, min_valid_kps_score=0.05, invalid_default_error=np.nan):
-    p_3d_homo = np.concatenate([p_3d.keypoints, np.ones((len(p_3d.keypoints), 1))], axis=1)
+    p_3d_kpts, p_2d_kpts = map_to_common_keypoints(p_3d, p_2d)
+    p_3d_homo = np.concatenate([p_3d_kpts[:, :3], np.ones((len(p_3d_kpts), 1))], axis=1)
     p_2d_reproj = calib.P @ p_3d_homo.T
     p_2d_reproj = (p_2d_reproj[:2] / (1e-5 + p_2d_reproj[2])).T
 
-    score_mask = (p_2d.keypoints_score.flatten() * p_3d.keypoints_score.flatten()) > min_valid_kps_score
+    score_mask = (p_2d_kpts[:, -1].flatten() * p_3d_kpts[:, -1].flatten()) > min_valid_kps_score
     if any(score_mask):
-        e = np.linalg.norm(p_2d_reproj[score_mask, :2] - p_2d.keypoints[score_mask, :2], axis=-1)
+        e = np.linalg.norm(p_2d_reproj[score_mask, :2] - p_2d_kpts[score_mask, :2], axis=-1)
         return np.mean(e)
     else:
         return invalid_default_error
@@ -1171,6 +1172,13 @@ def viz_tracklets(in_tracklet_path, video_dir: Path, out_dir: Path):
         view_img_dir = Path(view_img_dir)
         vpaths = sorted([vdir for vdir in video_dir.glob('*.*')], key=lambda x_: int(x_.stem))
         view_imgs_paths = []
+
+        for t_idx, tlet in enumerate(all_tlets):
+            out_tlet_viz = out_dir / f'tlet_{t_idx}'
+            os.makedirs(out_tlet_viz, exist_ok=True)
+            poses_3d = [p[-1] for p in tlet.poses]
+            plot_poses_3d(poses_3d)
+
         for v_idx, vpath in enumerate(vpaths):
             img_dir = view_img_dir / vpath.stem
             os.makedirs(img_dir, exist_ok=True)
@@ -1218,6 +1226,6 @@ if __name__ == "__main__":
                                          calib_dir=Path(args.calib_dir),
                                          out_data_dir=Path(args.out_data_dir))
     elif args.mode == 'viz':
-        out_tlet_viz_dir = '/media/F/datasets/shelf/debug/tracklets_viz'
+        out_tlet_viz_dir = '/media/F/datasets/shelf/tracklets'
         os.makedirs(out_tlet_viz_dir, exist_ok=True)
         viz_tracklets(args.tlet_path, Path(args.video_dir), Path(out_tlet_viz_dir))
