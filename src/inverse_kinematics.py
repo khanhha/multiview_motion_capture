@@ -199,6 +199,84 @@ def foward_kinematics(skel: Skeleton, param: PoseShapeParam):
     return g_pos, g_transforms
 
 
+def solve_pose_reproj(skel: Skeleton,
+                      obs_pose_2d: np.ndarray,
+                      obs_kps_idxs: List[int],
+                      cam_projs: List[np.ndarray],
+                      skel_kps_idxs: List[int],
+                      init_param: PoseShapeParam,
+                      n_max_iter=5):
+    obs_pose_2d = obs_pose_2d[:, obs_kps_idxs, :]
+    init_locs, _ = foward_kinematics(skel, init_param)
+    n_cams = len(cam_projs)
+
+    def _decompose(_x: PoseShapeParam):
+        return _x[:3], _x[3:].reshape((-1, 3))
+
+    def _compose(p: PoseShapeParam):
+        return np.concatenate([p.root.flatten(), p.euler_angles.flatten()])
+
+    def _residual_step_joints_3d(_x):
+        _root, _angles = _decompose(_x)
+        _joint_locs, _ = foward_kinematics(skel, PoseShapeParam(_root, _angles, init_param.bone_lens))
+        _joint_locs = _joint_locs[skel_kps_idxs, :]
+        _n = len(_joint_locs)
+        _joint_homo = np.concatenate([_joint_locs, np.ones((_n, 1), dtype=_joint_locs.dtype)], axis=-1).T
+
+        _cam_kps_reproj = []
+        for _vi in range(n_cams):
+            _kps_proj = (cam_projs[_vi] @ _joint_homo)
+            _kps_proj = (_kps_proj[:2] / (1e-5 + _kps_proj[2])).T
+            _cam_kps_reproj.append(_kps_proj)
+        _cam_kps_reproj = np.array(_cam_kps_reproj)
+        _diffs = _cam_kps_reproj - obs_pose_2d[:, :, :2]
+        _diffs = _diffs * obs_pose_2d[:, :, -1:]
+        return _diffs.flatten()
+
+    results = least_squares(_residual_step_joints_3d, _compose(init_param), verbose=solver_verbose, max_nfev=n_max_iter)
+    root, angles = _decompose(results.x)
+    return PoseShapeParam(root, angles, init_param.bone_lens)
+
+
+def solve_pose_bone_lens_reproj(skel: Skeleton,
+                                obs_pose_2d: np.ndarray,
+                                obs_kps_idxs: List[int],
+                                cam_projs: List[np.ndarray],
+                                skel_kps_idxs: List[int],
+                                init_param: PoseShapeParam,
+                                n_max_iter=5):
+    obs_pose_2d = obs_pose_2d[:, obs_kps_idxs, :]
+    n_cams = len(cam_projs)
+    n_joints = skel.n_joints
+
+    def _decompose(_x):
+        return _x[:3], _x[3:3 + n_joints * 3].reshape((-1, 3)), _x[3 + n_joints * 3:]
+
+    def _compose(p: PoseShapeParam):
+        return np.concatenate([p.root.flatten(), p.euler_angles.flatten(), p.bone_lens.flatten()])
+
+    def _residual_root_angles_bone_lens(_x):
+        _root, _angles, _blens = _decompose(_x)
+        _joint_locs, _ = foward_kinematics(skel, PoseShapeParam(_root, _angles, _blens))
+        _joint_locs = _joint_locs[skel_kps_idxs, :]
+        _n = len(_joint_locs)
+        _joint_homo = np.concatenate([_joint_locs, np.ones((_n, 1), dtype=_joint_locs.dtype)], axis=-1).T
+        _cam_kps_reproj = []
+        for _vi in range(n_cams):
+            _kps_proj = (cam_projs[_vi] @ _joint_homo)
+            _kps_proj = (_kps_proj[:2] / (1e-5 + _kps_proj[2])).T
+            _cam_kps_reproj.append(_kps_proj)
+        _cam_kps_reproj = np.array(_cam_kps_reproj)
+        _diffs = _cam_kps_reproj - obs_pose_2d[:, :, :2]
+        _diffs = _diffs * obs_pose_2d[:, :, -1:]
+        return _diffs.flatten()
+
+    results = least_squares(_residual_root_angles_bone_lens, _compose(init_param), verbose=solver_verbose,
+                            max_nfev=n_max_iter)
+    root, angles, blens = _decompose(results.x)
+    return PoseShapeParam(root, angles, blens)
+
+
 def solve_pose(skel: Skeleton,
                obs_pose_3d: np.ndarray,
                obs_kps_idxs: List[int],
@@ -321,13 +399,20 @@ class PoseSolver:
             init_param = self.init_pose
             n_max_iter = 5
 
-        param_1 = solve_pose(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, init_param, n_max_iter)
-        param_2 = solve_pose_bone_lens(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, param_1,
-                                       n_max_iter)
+        use_only_reproj = True
+        if use_only_reproj:
+            param_1 = solve_pose_reproj(self.skel, np.array(self.cam_poses_2d), self.obs_kps_idxs, self.cam_projs,
+                                        self.skel_kps_idxs, init_param, n_max_iter)
+            param_2 = solve_pose_bone_lens_reproj(self.skel, np.array(self.cam_poses_2d), self.obs_kps_idxs,
+                                                  self.cam_projs, self.skel_kps_idxs, param_1, n_max_iter)
+        else:
+            param_1 = solve_pose(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, init_param, n_max_iter)
+            param_2 = solve_pose_bone_lens(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, param_1,
+                                           n_max_iter)
 
         pred_locs_2, _ = foward_kinematics(self.skel, param_2)
 
-        debug = False
+        debug = True
         if debug:
             pred_locs_1, _ = foward_kinematics(self.skel, param_1)
             init_locs, _ = foward_kinematics(self.skel, init_param)
