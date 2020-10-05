@@ -378,8 +378,6 @@ class PoseSolver:
         self.obs_kps_idx_map[KpsType.Spine] = n_old_kps
 
     def solve(self) -> Tuple[PoseShapeParam, Pose]:
-        obs_pose_3d = triangulate_point_groups_from_multiple_views_linear(self.cam_projs,
-                                                                          self.cam_poses_2d, 0.01, True)
         # debug
         # return (PoseShapeParam(root=np.zeros((3,)),
         #                        euler_angles=np.zeros((17, 3)), bone_lens=np.zeros((17, 3))),
@@ -389,6 +387,8 @@ class PoseSolver:
         #              pose_type=KpsFormat.COCO))
 
         if self.init_pose is None:
+            obs_pose_3d = triangulate_point_groups_from_multiple_views_linear(self.cam_projs,
+                                                                              self.cam_poses_2d, 0.01, True)
             init_root = 0.5 * (obs_pose_3d[self.obs_kps_idx_map[KpsType.L_Hip], :3] +
                                obs_pose_3d[self.obs_kps_idx_map[KpsType.R_Hip], :3])
             init_blens = self.skel.ref_side_bone_lens.copy()
@@ -406,16 +406,20 @@ class PoseSolver:
             param_2 = solve_pose_bone_lens_reproj(self.skel, np.array(self.cam_poses_2d), self.obs_kps_idxs,
                                                   self.cam_projs, self.skel_kps_idxs, param_1, n_max_iter)
         else:
+            obs_pose_3d = triangulate_point_groups_from_multiple_views_linear(self.cam_projs,
+                                                                              self.cam_poses_2d, 0.01, True)
             param_1 = solve_pose(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, init_param, n_max_iter)
             param_2 = solve_pose_bone_lens(self.skel, obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, param_1,
                                            n_max_iter)
 
         pred_locs_2, _ = foward_kinematics(self.skel, param_2)
 
-        debug = True
+        debug = False
         if debug:
             pred_locs_1, _ = foward_kinematics(self.skel, param_1)
             init_locs, _ = foward_kinematics(self.skel, init_param)
+            obs_pose_3d = triangulate_point_groups_from_multiple_views_linear(self.cam_projs,
+                                                                              self.cam_poses_2d, 0.01, True)
             pose_bones_colors = [
                 (init_locs, self.skel.bone_idxs, 'red'),
                 (pred_locs_1, self.skel.bone_idxs, 'green'),
