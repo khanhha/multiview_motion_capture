@@ -30,7 +30,7 @@ from pose_def import (Pose, KpsType, KpsFormat, get_pose_bones_index, conversion
 from mv_math_util import (Calib, calc_epipolar_error, triangulate_point_groups_from_multiple_views_linear,
                           project_3d_points_to_image_plane_without_distortion, unproject_uv_to_rays,
                           points_to_lines_distances, calc_pairwise_f_mats, geometry_affinity, get_fundamental_matrix)
-from pose_viz import plot_poses_3d
+from pose_viz import plot_poses_3d, plot_poses_3d_reprojects
 from mv_association import match_als, match_svt, match_eig, match_bip
 from enum import Enum
 from inverse_kinematics import PoseShapeParam, Skeleton, PoseSolver, load_skeleton
@@ -333,7 +333,7 @@ class MvTracklet:
                             cam_projs=cam_projs,
                             obs_kps_format=cam_poses_2d[0][1].pose_type)
         pparam, pose = solver.solve()
-        self.poses: List[Tuple[PoseShapeParam, Pose]] = [(pparam, pose)]
+        self.poses: List[Tuple[int, PoseShapeParam, Pose]] = [(frm_idx, pparam, pose)]
 
         self.bone_lengs: np.ndarray
 
@@ -345,7 +345,7 @@ class MvTracklet:
 
     @property
     def last_pose_3d(self):
-        return self.poses[-1][1]
+        return self.poses[-1][-1]
 
     def __len__(self):
         return len(self.frame_idxs)
@@ -362,12 +362,12 @@ class MvTracklet:
         self.cam_projs.append(cam_projs)
 
         solver = PoseSolver(self.skel,
-                            init_pose=self.poses[-1][0],
+                            init_pose=self.poses[-1][1],
                             cam_poses_2d=[p[1].to_kps_array() for p in cam_poses],
                             cam_projs=cam_projs,
                             obs_kps_format=cam_poses[0][1].pose_type)
         pparam, pose = solver.solve()
-        self.poses.append((pparam, pose))
+        self.poses.append((frm_idx, pparam, pose))
 
         self.time_since_update = 0
         self.hits += 1
@@ -379,7 +379,7 @@ class MvTracklet:
         cam_poses = self.cam_poses_2d[-1]
         cam_projs = self.cam_projs[-1]
         solver = PoseSolver(self.skel,
-                            init_pose=self.poses[-1][0],
+                            init_pose=self.poses[-1][1],
                             cam_poses_2d=[p[1].to_kps_array() for p in cam_poses],
                             cam_projs=cam_projs,
                             obs_kps_format=cam_poses[0][1].pose_type)
@@ -1163,35 +1163,47 @@ def draw_tracklet(tlet: MvTracklet, mv_img_paths: List[Dict[int, Path]], out_dir
 
 
 def viz_tracklets(in_tracklet_path, video_dir: Path, out_dir: Path):
-    import tempfile
+    calib_dir = video_dir.parent / 'calib'
+    vpaths = sorted([vdir for vdir in video_dir.glob('*.*')], key=lambda x_: int(x_.stem))
+    cam_projs = []
+    for video_path in vpaths:
+        img_dir = video_dir / video_path.stem
+        if not img_dir.exists():
+            os.makedirs(img_dir, exist_ok=True)
+            is_empty = not any(img_dir.iterdir())
+            if is_empty:
+                video_to_images(video_path, img_dir, 'jpg')
+        cam_projs.append(load_calib(calib_dir / f'{video_path.stem}.json').P)
 
+    out_vid_path = video_dir.parent / 'result.mp4'
     with open(in_tracklet_path, 'rb') as file:
         all_tlets: List[MvTracklet] = pickle.load(file)["tracklets"]
 
-    with tempfile.TemporaryDirectory() as view_img_dir:
-        view_img_dir = Path(view_img_dir)
-        vpaths = sorted([vdir for vdir in video_dir.glob('*.*')], key=lambda x_: int(x_.stem))
-        view_imgs_paths = []
+        n_max_tlets = 10
+        in_tlet_frm_poses_3d = [[(p[0], p[-1]) for p in tlet.poses] for tlet in all_tlets[:n_max_tlets]]
+        plot_poses_3d_reprojects(in_tlet_frm_poses_3d, video_dir, view_proj_mats=cam_projs,
+                                 out_vid_path=out_vid_path,
+                                 fps=24)
 
-        for t_idx, tlet in enumerate(all_tlets):
-            out_tlet_viz = out_dir / f'tlet_{t_idx}'
-            os.makedirs(out_tlet_viz, exist_ok=True)
-            poses_3d = [p[-1] for p in tlet.poses]
-            plot_poses_3d(poses_3d)
+        # for t_idx, tlet in enumerate(all_tlets):
+        #     out_tlet_viz = out_dir / f'tlet_{t_idx}'
+        #     os.makedirs(out_tlet_viz, exist_ok=True)
+        #     poses_3d = [p[-1] for p in tlet.poses]
+        #     plot_poses_3d(poses_3d)
 
-        for v_idx, vpath in enumerate(vpaths):
-            img_dir = view_img_dir / vpath.stem
-            os.makedirs(img_dir, exist_ok=True)
-            video_to_images(vpath, img_dir, 'jpg')
-            img_paths = {int(ipath.stem): ipath for ipath in img_dir.glob('*.jpg')}
-            view_imgs_paths.append(img_paths)
-
-        for t_idx, tlet in enumerate(all_tlets):
-            out_tlet_viz = out_dir / f'tlet_{t_idx}'
-            os.makedirs(out_tlet_viz, exist_ok=True)
-            draw_tracklet(tlet, view_imgs_paths, out_dir=out_tlet_viz)
-            # poses_3d = [p[-1] for p in tlet.poses]
-            # plot_poses_3d(poses_3d)
+        # for v_idx, vpath in enumerate(vpaths):
+        #     img_dir = view_img_dir / vpath.stem
+        #     os.makedirs(img_dir, exist_ok=True)
+        #     video_to_images(vpath, img_dir, 'jpg')
+        #     img_paths = {int(ipath.stem): ipath for ipath in img_dir.glob('*.jpg')}
+        #     view_imgs_paths.append(img_paths)
+        #
+        # for t_idx, tlet in enumerate(all_tlets):
+        #     out_tlet_viz = out_dir / f'tlet_{t_idx}'
+        #     os.makedirs(out_tlet_viz, exist_ok=True)
+        #     draw_tracklet(tlet, view_imgs_paths, out_dir=out_tlet_viz)
+        #     poses_3d = [p[-1] for p in tlet.poses]
+        #     plot_poses_3d(poses_3d)
 
 
 def parse_args():
