@@ -5,19 +5,7 @@ import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.optimize import least_squares
 import torch
-
-
-@dataclass
-class Calib:
-    K: np.ndarray  # 3x3
-    Rt: np.ndarray  # 3x4
-    P: np.ndarray  # 3x4
-    Kr_inv: np.ndarray  # 3x3
-    img_wh_size: Tuple[int, int]
-
-    @property
-    def cam_loc(self):
-        return -self.Rt[:3, :3].T @ self.Rt[:3, 3]
+from common import Calib
 
 
 def unproject_uv_to_rays(points: np.ndarray, calib: Calib):

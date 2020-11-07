@@ -27,25 +27,18 @@ from scipy.optimize import linear_sum_assignment
 from typing import Tuple
 from pose_def import (Pose, KpsType, KpsFormat, get_pose_bones_index, conversion_openpose_25_to_coco,
                       map_to_common_keypoints)
-from mv_math_util import (Calib, calc_epipolar_error, triangulate_point_groups_from_multiple_views_linear,
+from mv_math_util import (calc_epipolar_error, triangulate_point_groups_from_multiple_views_linear,
                           project_3d_points_to_image_plane_without_distortion, unproject_uv_to_rays,
                           points_to_lines_distances, calc_pairwise_f_mats, geometry_affinity, get_fundamental_matrix)
 from pose_viz import plot_poses_3d, plot_poses_3d_reprojects
 from mv_association import match_als, match_svt, match_eig, match_bip
+from common import FrameData, Calib
 from enum import Enum
-from inverse_kinematics import PoseShapeParam, Skeleton, PoseSolver, load_skeleton
+from inverse_kinematics_pino import PoseShapeParam, Skeleton, PoseSolver, load_skeleton
 from pose_viz import draw_poses_concat, draw_pose_epiplar_lines, draw_pose
 from collections import defaultdict
 
 matplotlib.use('Qt5Agg')
-
-
-@dataclass
-class FrameData:
-    frame_idx: int
-    poses: Dict[int, Pose]
-    calib: Calib
-    view_id: int
 
 
 class PoseAssociation:
@@ -884,7 +877,7 @@ class MvTracker:
 
         st_matches = associate_tracking(alive_tracklets, d_frames, min_pixel_error_hard_threshold=50)
 
-        debug = True
+        debug = False
         if debug:
             # draw matched elements
             matches_vizs = debug_draw_spatial_time_matches(frm_idx, st_matches, alive_tracklets, d_frames)
@@ -945,11 +938,14 @@ class MvTracker:
                 cam_projs = [d_frames[v_idx].calib.P for v_idx in s_match.view_idxs]
                 tlet = MvTracklet(frm_idx, cam_poses_2d=pose_2ds, cam_projs=cam_projs, skel=self.skeleton)
                 p_3d = tlet.last_pose_3d
-                p_erros = []
-                for v_idx, p_2d in pose_2ds:
-                    e = reprojection_error(p_3d, p_2d, d_frames[v_idx].calib, min_valid_kps_score=0.05)
-                    p_erros.append(e)
-                mean_reproj_e = np.mean(p_erros)
+                debug_error = False
+                if debug_error:
+                    p_erros = []
+                    for v_idx, p_2d in pose_2ds:
+                        e = reprojection_error(p_3d, p_2d, d_frames[v_idx].calib, min_valid_kps_score=0.05)
+                        p_erros.append(e)
+                    mean_reproj_e = np.mean(p_erros)
+                    print(mean_reproj_e)
                 self.tracklets.append(tlet)
 
         # filter out dead tracks
@@ -1055,6 +1051,9 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     n_test = min(len(frm_pose_paths), n_test)
     with tqdm(total=len(frm_pose_paths), desc='tracking') as bar:
         while True:
+            frm_idx += 1
+            if frm_idx < 1250:
+                continue
             bar.update()
             bar.set_description(
                 f'tracking. n_dead = {len(tracker.dead_tracklets)}. n_tracks = {len(tracker.tracklets)}')
@@ -1067,8 +1066,12 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
             g_cur_frame_images = org_frames
 
             d_frames: List[FrameData] = load_pickle(frm_pose_paths[frm_idx], 'rb')
-            frm_idx += 1
 
+            # for frm in d_frames:
+            #     for p_id, p in frm.poses.items():
+            #         import matplotlib.pyplot as plt
+            #         plt.plot(p.keypoints[:, 0], p.keypoints[:, 1], '+')
+            #         plt.show(block=True)
             # if frm_idx < 90:
             #     continue
 
