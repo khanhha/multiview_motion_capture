@@ -314,16 +314,19 @@ class MvTracklet:
                  frm_idx: int,
                  cam_poses_2d: List[Tuple[int, Pose]],
                  cam_projs: List[np.ndarray],
+                 cam_calibs: List[Calib],
                  skel: Skeleton,
                  n_inits: int = 3,
                  max_age: int = 0):
         self.frame_idxs: List[int] = [frm_idx]
         self.cam_poses_2d: List[List[Tuple[int, Pose]]] = [cam_poses_2d]
         self.cam_projs: List[List[np.ndarray]] = [cam_projs]
+        self.cam_calibs: List[Calib] = [cam_calibs]
         self.skel = skel
         solver = PoseSolver(skel, init_pose=None,
                             cam_poses_2d=[p[1].to_kps_array() for p in cam_poses_2d],
                             cam_projs=cam_projs,
+                            cam_calibs=cam_calibs,
                             obs_kps_format=cam_poses_2d[0][1].pose_type)
         pparam, pose = solver.solve()
         self.poses: List[Tuple[int, PoseShapeParam, Pose]] = [(frm_idx, pparam, pose)]
@@ -348,6 +351,7 @@ class MvTracklet:
 
     def update(self, frm_idx: int, match: SpatialMatch, frames: List[FrameData]):
         cam_projs = [frames[v_idx].calib.P for v_idx in match.view_idxs]
+        cam_calibs = [frames[v_idx].calib for v_idx in match.view_idxs]
         cam_poses = [(v_idx, frames[v_idx].poses[p_id]) for v_idx, p_id in zip(match.view_idxs, match.pose_ids)]
 
         self.frame_idxs.append(frm_idx)
@@ -358,6 +362,7 @@ class MvTracklet:
                             init_pose=self.poses[-1][1],
                             cam_poses_2d=[p[1].to_kps_array() for p in cam_poses],
                             cam_projs=cam_projs,
+                            cam_calibs=cam_calibs,
                             obs_kps_format=cam_poses[0][1].pose_type)
         pparam, pose = solver.solve()
         self.poses.append((frm_idx, pparam, pose))
@@ -936,7 +941,11 @@ class MvTracker:
                 pose_2ds = [(v_idx, d_frames[v_idx].poses[p_id]) for v_idx, p_id in
                             zip(s_match.view_idxs, s_match.pose_ids)]
                 cam_projs = [d_frames[v_idx].calib.P for v_idx in s_match.view_idxs]
-                tlet = MvTracklet(frm_idx, cam_poses_2d=pose_2ds, cam_projs=cam_projs, skel=self.skeleton)
+                cam_calibs = [d_frames[v_idx].calib for v_idx in s_match.view_idxs]
+                tlet = MvTracklet(frm_idx, cam_poses_2d=pose_2ds,
+                                  cam_projs=cam_projs,
+                                  cam_calibs=cam_calibs,
+                                  skel=self.skeleton)
                 p_3d = tlet.last_pose_3d
                 debug_error = False
                 if debug_error:
@@ -1052,7 +1061,7 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     with tqdm(total=len(frm_pose_paths), desc='tracking') as bar:
         while True:
             frm_idx += 1
-            if frm_idx < 1250:
+            if frm_idx < 1420:
                 continue
             bar.update()
             bar.set_description(
