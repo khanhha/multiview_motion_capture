@@ -164,7 +164,7 @@ class HumanModel:
     robot: RobotWrapper
 
     def __init__(self, package_dir: Path):
-        filename = f"{package_dir}/romeo_description/urdf/romeo_small.urdf"
+        filename = f"{package_dir}/romeo_description/urdf/romeo_khanh.urdf"
         self.robot = RobotWrapper.BuildFromURDF(filename, package_dirs=package_dir,
                                                 root_joint=pin.JointModelFreeFlyer())
         self.data = self.robot.data
@@ -172,7 +172,8 @@ class HumanModel:
 
         # joints list for getting forward location for IK optimization
         joint_lists = {
-            "LShoulderYaw": KpsType.L_Shoulder, "RShoulderYaw": KpsType.R_Shoulder,
+            "LShoulderYaw": KpsType.L_Shoulder, "RShoulder"
+                                                "Yaw": KpsType.R_Shoulder,
             "LElbowRoll": KpsType.L_Elbow, "RElbowRoll": KpsType.R_Elbow,
             "LWristPitch": KpsType.L_Wrist, 'RWristPitch': KpsType.R_Wrist,
             "RHipYaw": KpsType.R_Hip, "LHipYaw": KpsType.L_Hip,
@@ -380,6 +381,14 @@ def solve_pose_from_2d(skel: HumanModel,
                        init_param: PoseShapeParam,
                        vis: bool,
                        n_max_iter=5) -> PoseShapeParam:
+    out_debug_dir = "/media/F/thesis/real-time-motion-capture/yolo-tensorrt/samples/"
+    file = cv2.FileStorage(f'{out_debug_dir}/test_poses.yaml', cv2.FileStorage_WRITE)
+    file.write('pose_3d', obs_pose_3d)
+    for idx, (pose, calib) in enumerate(zip(obs_cam_pose_2d, cam_calibs)):
+        file.write(f'pose2d_{idx}', pose)
+        file.write(f'cam_{idx}', calib.P)
+    file.release()
+
     if vis:
         skel.robot.display(init_param.pose)
         skel.robot.viewer.gui.refresh()
@@ -424,17 +433,27 @@ def solve_pose_from_2d(skel: HumanModel,
             p_2ds_homo = p_2ds_homo.T
             n_kps = len(pin_joint_ids)
             for i in range(n_kps):
-                jac = pin.getJointJacobian(model, data, pin_joint_ids[i], pin.LOCAL_WORLD_ALIGNED)[:3, :]
+                print('\n\n\n kps_idx = {i}')
+                org_jac = pin.getJointJacobian(model, data, pin_joint_ids[i], pin.LOCAL_WORLD_ALIGNED)[:3, :]
                 kps_2d = p_2ds[i]
 
                 proj_jac = image_jacobian(calib.P, p_2ds_homo[i])
 
-                jac = proj_jac @ jac
-                err = obs_pose[i, :2] - kps_2d
-                err = -err
+                jac = proj_jac @ org_jac
+                err = kps_2d - obs_pose[i, :2]
                 mu = lm_damping * max(1e-3, err.dot(err))
+
+                print('kps_3d: ', p_3ds[i])
+                print('kps_3d_homo: ', p_2ds_homo[i])
+                print('kps_2d: ', kps_2d)
+                print('kps_2d_obs: ', obs_pose[i, :2])
+                print('err: ', err)
+                print('proj_jac: ', proj_jac)
+                print('jac: ', jac)
+                print('J: ', org_jac)
+
                 ATA += np.dot(jac.T, jac) + mu * np.eye(nv)
-                ATb += np.dot(-err.T, jac)
+                ATb += jac.T @ err
                 all_errors.append(err)
 
         prev_cost = cost
@@ -442,9 +461,14 @@ def solve_pose_from_2d(skel: HumanModel,
         impr = abs(cost - prev_cost) / prev_cost
         if impr < impr_stop:
             break
-        dv = solve_qp(ATA, ATb)
 
-        x = pin.integrate(model, x, -dv * DT)
+        # dv = solve_qp(ATA, ATb)
+        print("ATA: ", ATA)
+        print("ATb: ", ATb)
+        sol, resids, rank, s = np.linalg.lstsq(ATA, ATb)
+        dv = -0.1 * sol
+        print('dv: ', dv)
+        x = pin.integrate(model, x, dv)
 
         if vis:
             skel.robot.display(x)
@@ -616,7 +640,7 @@ class PoseSolver:
         obs_pose_3d = triangulate_point_groups_from_multiple_views_linear(self.cam_projs,
                                                                           self.cam_poses_2d, 0.01, True)
         init_param = PoseShapeParam(joint_placements=None, pose=self.human.robot.q0.copy())
-        time.sleep(5)
+        # time.sleep(5)
         param_1 = solve_pose_from_2d(self.human, self.cam_poses_2d, self.cam_calibs,
                                      obs_pose_3d, self.obs_kps_idxs, self.skel_kps_idxs, init_param,
                                      vis=True,

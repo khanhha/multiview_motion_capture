@@ -1061,8 +1061,8 @@ def run_main(video_dir: Path, pose_dir: Path, out_dir: Path):
     with tqdm(total=len(frm_pose_paths), desc='tracking') as bar:
         while True:
             frm_idx += 1
-            if frm_idx < 1420:
-                continue
+            # if frm_idx < 1420:
+            #     continue
             bar.update()
             bar.set_description(
                 f'tracking. n_dead = {len(tracker.dead_tracklets)}. n_tracks = {len(tracker.tracklets)}')
