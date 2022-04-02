@@ -3,7 +3,9 @@
 This is a prototype implementation in python of the paper "[Cross-View Tracking for Multi-Human 3D Pose Estimation at over 100 FPS
 ](https://arxiv.org/abs/2003.03972)".
 
-![image alt ><](https://user-images.githubusercontent.com/2276264/161385537-60e30983-95c8-4123-af8f-de25821eae68.png)
+<p align="center">
+  <img src="https://user-images.githubusercontent.com/2276264/161385537-60e30983-95c8-4123-af8f-de25821eae68.png">
+</p>
 
 In addition to the original ideas from the paper, the implementation also includes
 - a temporal inverse kinematics solver that transform 3d triangulated points into joint angles 
